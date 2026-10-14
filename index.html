@@ -1189,6 +1189,10 @@
       100% { background-position: -200% 0; }
     }
 
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
     /* Chat Composer & Suggested Replies */
     .chat-composer-wrap {
       background-color: var(--bg-surface);
@@ -2327,6 +2331,244 @@
       }
     };
 
+    /* NAI-DIRECTOR:BEGIN — Visual Director (2-step prompt engineering for NovelAI Diffusion V5) */
+    const NovelAIVisualDirector = {
+      async synthesizePrompt({ character, sceneText, settings, signal }) {
+        const prov = settings?.provider || {};
+        const imgSettings = settings?.imageGen || {};
+        const model = imgSettings.promptDirectorModel || 'glm-4-6';
+
+        if (model === 'off') {
+          return {
+            globalPrompt: `${imgSettings.stylePrefix || 'depthness, high complexity, cinematic lighting'}, ${sceneText || character?.tagline || 'cinematic scene'}, no text`,
+            characterPrompt: [character?.name, character?.tagline, character?.description].filter(Boolean).join(', ')
+          };
+        }
+
+        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const rawProxy = String(prov.proxyBase || '').trim().replace(/\/+$/, '');
+        const isDirect = !rawProxy || (!isLocal && (rawProxy === '/proxy' || rawProxy === 'direct'));
+
+        const targetUrl = isDirect
+          ? 'https://text.novelai.net/oa/v1/completions'
+          : `${rawProxy || '/proxy'}/text/oa/v1/completions`;
+
+        const headers = { 'Content-Type': 'application/json' };
+        const tokenOverride = String(prov.apiKey || '').trim();
+        if (tokenOverride && !/^https?:\/\//i.test(tokenOverride)) {
+          headers['Authorization'] = `Bearer ${tokenOverride.replace(/^Bearer\s+/i, '')}`;
+        } else if (isDirect) {
+          throw new Error('NovelAI API token is required for Visual Director. Por favor escribe tu API Token en Ajustes.');
+        }
+
+        const cleanScene = (sceneText || '').replace(/[*_#]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+
+        const prompt = [
+          'You are an expert AI Art Director for NovelAI Diffusion V5.',
+          'Your job is to read the character profile and the current scene, then synthesize an image prompt divided into two exact parts: Global Prompt and Character 1.',
+          '',
+          'Follow these rules based on the NovelAI Diffusion V5 Prompt Master Guide:',
+          '1. Global Prompt:',
+          '- Starts with V5 modifiers: "depthness, high complexity"',
+          '- Describes the environment, background, atmospheric lighting, camera perspective, framing, mood.',
+          '- Do NOT describe the character\'s clothing, physical traits, or expressions here.',
+          '- Ends with ", no text".',
+          '',
+          '2. Character 1:',
+          '- Starts with gender/subject (e.g. "1woman" or "1man", "attractive male" if fitting).',
+          '- Physical traits extracted from character description: hair color/style, eye color, facial features/scars, body build.',
+          '- Exact clothing and accessories appropriate for the character and scene.',
+          '- Pose, micro-actions, and facial expression matching the current scene.',
+          '- Mix natural descriptive English with Danbooru tags.',
+          '',
+          'Format your output EXACTLY like this with no other commentary:',
+          'Global Prompt: <global prompt>',
+          'Character 1: <character prompt>',
+          '',
+          '---',
+          `Character Name: ${character?.name || 'Character'}`,
+          character?.tagline ? `Character Tagline: ${character.tagline}` : '',
+          character?.description ? `Character Description: ${character.description}` : '',
+          `Scene: ${cleanScene || character?.tagline || 'A quiet reflective moment.'}`,
+          '---',
+          'Global Prompt:'
+        ].filter(Boolean).join('\n');
+
+        const abortCtrl = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortCtrl.abort(new Error('Visual Director request timed out after 25s'));
+        }, 25000);
+        if (signal) {
+          signal.addEventListener('abort', () => abortCtrl.abort(signal.reason), { once: true });
+        }
+
+        try {
+          const res = await fetch(targetUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: model === 'xialong-v1' ? 'xialong-v1' : 'glm-4-6',
+              prompt,
+              max_tokens: 250,
+              temperature: 0.7,
+              top_p: 0.9,
+              repetition_penalty: 1.05,
+              stop: ['\n\n---', '---', '\n\n\n']
+            }),
+            signal: abortCtrl.signal
+          });
+
+          if (!res.ok) {
+            let msg = `Visual Director HTTP error (${res.status})`;
+            try {
+              const errJson = await res.json();
+              msg = errJson.message || errJson.error || msg;
+            } catch {}
+            throw new Error(msg);
+          }
+
+          const data = await res.json();
+          const rawText = data?.choices?.[0]?.text || '';
+          return this.parseDirectorOutput(rawText, character, cleanScene, imgSettings);
+        } catch (err) {
+          console.warn('[NovelAIVisualDirector] Failed to synthesize scene prompt, falling back to heuristic tags:', err);
+          return {
+            globalPrompt: `${imgSettings.stylePrefix || 'depthness, high complexity, cinematic lighting'}, ${cleanScene || 'cinematic scene'}, no text`,
+            characterPrompt: [character?.name, character?.tagline, character?.description].filter(Boolean).join(', ')
+          };
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      },
+
+      async synthesizeAvatarPrompt({ character, settings, signal }) {
+        const prov = settings?.provider || {};
+        const imgSettings = settings?.imageGen || {};
+        const model = imgSettings.promptDirectorModel || 'glm-4-6';
+
+        if (model === 'off') {
+          return {
+            globalPrompt: 'depthness, high complexity, visual novel sprite, clean simple background, studio lighting, no text',
+            characterPrompt: [character?.name, character?.tagline, character?.description].filter(Boolean).join(', ')
+          };
+        }
+
+        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const rawProxy = String(prov.proxyBase || '').trim().replace(/\/+$/, '');
+        const isDirect = !rawProxy || (!isLocal && (rawProxy === '/proxy' || rawProxy === 'direct'));
+
+        const targetUrl = isDirect
+          ? 'https://text.novelai.net/oa/v1/completions'
+          : `${rawProxy || '/proxy'}/text/oa/v1/completions`;
+
+        const headers = { 'Content-Type': 'application/json' };
+        const tokenOverride = String(prov.apiKey || '').trim();
+        if (tokenOverride && !/^https?:\/\//i.test(tokenOverride)) {
+          headers['Authorization'] = `Bearer ${tokenOverride.replace(/^Bearer\s+/i, '')}`;
+        } else if (isDirect) {
+          throw new Error('NovelAI API token is required for Visual Director.');
+        }
+
+        const prompt = [
+          'You are an expert AI Art Director for NovelAI Diffusion V5.',
+          'Your job is to read the character profile and synthesize an avatar portrait prompt divided into two exact parts: Global Prompt and Character 1.',
+          '',
+          'Follow these rules based on the NovelAI Diffusion V5 Prompt Master Guide:',
+          '1. Global Prompt:',
+          '- Starts with V5 modifiers: "depthness, high complexity, visual novel sprite, clean simple background, studio lighting"',
+          '- Ends with ", no text".',
+          '',
+          '2. Character 1:',
+          '- Starts with gender/subject (e.g. "1woman" or "1man", "attractive male" if fitting), followed by "close-up portrait, looking at viewer".',
+          '- Physical traits extracted from character description: hair color/style, eye color, facial features/scars, body build.',
+          '- Clothing and accessories from character profile.',
+          '- Facial expression matching character personality.',
+          '- Mix natural descriptive English with Danbooru tags.',
+          '',
+          'Format your output EXACTLY like this with no other commentary:',
+          'Global Prompt: <global prompt>',
+          'Character 1: <character prompt>',
+          '',
+          '---',
+          `Character Name: ${character?.name || 'Character'}`,
+          character?.tagline ? `Character Tagline: ${character.tagline}` : '',
+          character?.description ? `Character Description: ${character.description}` : '',
+          '---',
+          'Global Prompt:'
+        ].filter(Boolean).join('\n');
+
+        const abortCtrl = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortCtrl.abort(new Error('Visual Director avatar request timed out after 25s'));
+        }, 25000);
+        if (signal) {
+          signal.addEventListener('abort', () => abortCtrl.abort(signal.reason), { once: true });
+        }
+
+        try {
+          const res = await fetch(targetUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: model === 'xialong-v1' ? 'xialong-v1' : 'glm-4-6',
+              prompt,
+              max_tokens: 220,
+              temperature: 0.7,
+              top_p: 0.9,
+              repetition_penalty: 1.05,
+              stop: ['\n\n---', '---', '\n\n\n']
+            }),
+            signal: abortCtrl.signal
+          });
+
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const rawText = data?.choices?.[0]?.text || '';
+          return this.parseDirectorOutput(rawText, character, 'avatar portrait', imgSettings);
+        } catch (err) {
+          console.warn('[NovelAIVisualDirector] Failed to synthesize avatar prompt, falling back to heuristic tags:', err);
+          return {
+            globalPrompt: 'depthness, high complexity, visual novel sprite, clean simple background, studio lighting, no text',
+            characterPrompt: [character?.name, character?.tagline, character?.description].filter(Boolean).join(', ')
+          };
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      },
+
+      parseDirectorOutput(rawText, character, fallbackDesc, imgSettings) {
+        const fullOutput = ('Global Prompt: ' + (rawText || '')).trim();
+        let globalPrompt = '';
+        let characterPrompt = '';
+
+        const charSplit = fullOutput.split(/Character\s*1\s*:/i);
+        if (charSplit.length >= 2) {
+          globalPrompt = charSplit[0].replace(/^Global\s*Prompt\s*:\s*/i, '').replace(/[\r\n]+/g, ' ').trim();
+          let charRaw = charSplit[1].split(/(?:Global\s*Prompt\s*:|Character\s*2\s*:|---)/i)[0];
+          characterPrompt = charRaw.replace(/[\r\n]+/g, ' ').trim();
+        } else {
+          globalPrompt = fullOutput.replace(/^Global\s*Prompt\s*:\s*/i, '').trim();
+          characterPrompt = [character?.name, character?.tagline, character?.description].filter(Boolean).join(', ');
+        }
+
+        globalPrompt = globalPrompt.replace(/\s+/g, ' ').trim().replace(/,\s*$/, '');
+        if (!/depthness/i.test(globalPrompt)) {
+          globalPrompt = 'depthness, high complexity, ' + globalPrompt;
+        }
+        if (!/no text/i.test(globalPrompt)) {
+          globalPrompt = globalPrompt + ', no text';
+        }
+
+        characterPrompt = characterPrompt.replace(/\s+/g, ' ').trim().replace(/,\s*$/, '');
+        if (!characterPrompt && character) {
+          characterPrompt = [character.name, character.tagline, character.description].filter(Boolean).join(', ');
+        }
+
+        return { globalPrompt, characterPrompt };
+      }
+    };
+    /* NAI-DIRECTOR:END */
+
     /* NAI-IMAGE:BEGIN — NovelAI image provider (used by API.generateImage and API.generateAvatar) */
     const NovelAIImage = {
       MODEL: 'nai-diffusion-5-full',
@@ -2346,18 +2588,48 @@
         }
       },
 
-      buildPayload({ prompt, character, settings, isAvatar = false }) {
+      buildPayload({ prompt, character, settings, isAvatar = false, globalPrompt = null, characterPrompt = null }) {
         const imgSettings = settings?.imageGen || {};
         const preset = isAvatar ? 'square' : (imgSettings.sizePreset || 'portrait');
         const { width, height } = this.getResolution(preset);
 
-        const stylePrefix = isAvatar
-          ? (imgSettings.stylePrefix || 'masterpiece, best quality, character avatar portrait, clean background')
-          : (imgSettings.stylePrefix || 'depthness, high complexity, cinematic lighting');
+        let basePrompt = '';
+        const characterPrompts = [];
 
-        const basePrompt = prompt.includes(stylePrefix)
-          ? [prompt, 'no text'].filter(Boolean).join(', ')
-          : [stylePrefix, prompt, 'no text'].filter(Boolean).join(', ');
+        if (globalPrompt && characterPrompt) {
+          basePrompt = globalPrompt;
+          characterPrompts.push({
+            prompt: characterPrompt,
+            uc: '',
+            center: { x: 0, y: 0 },
+            enabled: true
+          });
+        } else {
+          const stylePrefix = isAvatar
+            ? (imgSettings.stylePrefix || 'masterpiece, best quality, character avatar portrait, clean background')
+            : (imgSettings.stylePrefix || 'depthness, high complexity, cinematic lighting');
+
+          basePrompt = prompt.includes(stylePrefix)
+            ? [prompt, 'no text'].filter(Boolean).join(', ')
+            : [stylePrefix, prompt, 'no text'].filter(Boolean).join(', ');
+
+          if (character && character.name) {
+            const charParts = [
+              character.name,
+              character.tagline,
+              character.description
+            ].filter(Boolean);
+
+            if (charParts.length > 0) {
+              characterPrompts.push({
+                prompt: charParts.join(', '),
+                uc: '',
+                center: { x: 0, y: 0 },
+                enabled: true
+              });
+            }
+          }
+        }
 
         const negativePrompt = imgSettings.negativePrompt ||
           'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, bad anatomy';
@@ -2368,24 +2640,6 @@
         const seed = (imgSettings.seed && Number(imgSettings.seed) > 0)
           ? Number(imgSettings.seed)
           : Math.floor(Math.random() * 4294967295);
-
-        const characterPrompts = [];
-        if (character && character.name) {
-          const charParts = [
-            character.name,
-            character.tagline,
-            character.description
-          ].filter(Boolean);
-
-          if (charParts.length > 0) {
-            characterPrompts.push({
-              prompt: charParts.join(', '),
-              uc: '',
-              center: { x: 0, y: 0 },
-              enabled: true
-            });
-          }
-        }
 
         return {
           model: this.MODEL,
@@ -2507,8 +2761,8 @@
         return 'data:image/png;base64,' + btoa(binary);
       },
 
-      async generate({ prompt, character, settings, signal, isAvatar = false }) {
-        const payload = this.buildPayload({ prompt, character, settings, isAvatar });
+      async generate({ prompt, character, settings, signal, isAvatar = false, globalPrompt = null, characterPrompt = null }) {
+        const payload = this.buildPayload({ prompt, character, settings, isAvatar, globalPrompt, characterPrompt });
         const prov = settings?.provider || {};
         const tokenOverride = (prov.apiKey || '').trim();
         const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -2742,17 +2996,19 @@
       /**
        * Generates an inline scene image for the chat.
        * @param {Object} params
-       * @param {string} params.prompt
+       * @param {string} [params.prompt]
+       * @param {string} [params.globalPrompt]
+       * @param {string} [params.characterPrompt]
        * @param {Character} params.character
        * @param {Settings} params.settings
        * @param {AbortSignal} [params.signal]
        * @returns {Promise<string>} Image URL or Data URI
        */
-      async generateImage({ prompt, character, settings, signal }) {
+      async generateImage({ prompt, globalPrompt, characterPrompt, character, settings, signal }) {
         const s = settings || Storage.getSettings();
         const providerType = s?.provider?.type || 'novelai';
         if (providerType === 'novelai') {
-          return await NovelAIImage.generate({ prompt, character, settings: s, signal, isAvatar: false });
+          return await NovelAIImage.generate({ prompt, globalPrompt, characterPrompt, character, settings: s, signal, isAvatar: false });
         }
         await new Promise((resolve, reject) => {
           const timer = setTimeout(resolve, 950);
@@ -2764,7 +3020,7 @@
           }
         });
         const preset = s?.imageGen?.sizePreset || 'portrait';
-        return makeSceneSvg(prompt, character?.name || 'Scene', preset);
+        return makeSceneSvg(prompt || globalPrompt || 'Scene', character?.name || 'Scene', preset);
       },
 
       /**
@@ -2778,8 +3034,24 @@
         const s = Storage.getSettings();
         const providerType = s?.provider?.type || 'novelai';
         if (providerType === 'novelai') {
+          let globalPrompt = null;
+          let characterPrompt = null;
+          const directorModel = s?.imageGen?.promptDirectorModel || 'glm-4-6';
+          if (directorModel !== 'off' && (character?.description || character?.tagline)) {
+            try {
+              const synth = await NovelAIVisualDirector.synthesizeAvatarPrompt({
+                character,
+                settings: s,
+                signal
+              });
+              globalPrompt = synth.globalPrompt;
+              characterPrompt = synth.characterPrompt;
+            } catch (e) {
+              console.warn('[API.generateAvatar] Visual director failed for avatar, using heuristic tags:', e);
+            }
+          }
           const prompt = `${character?.name || 'character'}, close-up portrait avatar, looking at viewer`;
-          return await NovelAIImage.generate({ prompt, character, settings: s, signal, isAvatar: true });
+          return await NovelAIImage.generate({ prompt, globalPrompt, characterPrompt, character, settings: s, signal, isAvatar: true });
         }
         await new Promise((resolve, reject) => {
           const timer = setTimeout(resolve, 650);
@@ -2978,12 +3250,13 @@
         },
         imageGen: {
           sizePreset: 'portrait',
-          negativePrompt: 'lowres, bad anatomy, blurry, watermark, text, cropped',
+          promptDirectorModel: 'glm-4-6',
+          negativePrompt: 'lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, bad anatomy',
           seed: -1,
           steps: 28,
           guidance: 6.0,
           sampler: 'k_euler_ancestral',
-          stylePrefix: 'masterpiece, best quality, atmospheric lighting, detailed background'
+          stylePrefix: 'depthness, high complexity, cinematic lighting'
         },
         provider: {
           type: 'novelai',
@@ -3860,7 +4133,10 @@
 
               ${activeAlt.imageLoading ? `
                 <div class="msg-image-card">
-                  <div class="skeleton-box">Generating visual scene...</div>
+                  <div class="skeleton-box" style="display:flex; align-items:center; justify-content:center; gap:0.6rem; padding:1.2rem; font-size:0.88rem; text-align:center;">
+                    <div class="loading-spinner" style="display:inline-block; width:18px; height:18px; border:2px solid rgba(255,255,255,0.2); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></div>
+                    <span>${escapeHtml(activeAlt.imageLoadingStatus || 'Generating visual scene...')}</span>
+                  </div>
                 </div>
               ` : ''}
 
@@ -3868,7 +4144,7 @@
                 <div class="msg-image-card">
                   <img src="${ImageStore.resolveUrl(activeAlt.imageUrl)}" ${activeAlt.imageUrl.startsWith('idb:') ? `data-idb-key="${escapeHtml(activeAlt.imageUrl.slice(4))}"` : ''} alt="${escapeHtml(activeAlt.imagePrompt || 'Generated scene')}">
                   <div class="msg-image-meta">
-                    <div><strong>Prompt:</strong> ${escapeHtml(activeAlt.imagePrompt || 'Scene illustration')}</div>
+                    <div style="font-size:0.8rem; line-height:1.35; color:var(--text-muted); word-break:break-word;"><strong>Prompt:</strong> ${escapeHtml(activeAlt.imagePrompt || 'Scene illustration')}</div>
                     <div class="msg-image-actions">
                       <button class="mini-btn" data-action="regen-msg-image" data-msg-id="${escapeHtml(msg.id)}">${Icons.refresh} Regenerate</button>
                       <button class="mini-btn" data-action="download-msg-image" data-msg-id="${escapeHtml(msg.id)}">${Icons.download} Save</button>
@@ -4296,6 +4572,17 @@
             <!-- 3. Image Generation (Simple + Collapsed Advanced) -->
             <div class="profile-card" style="margin-bottom:1.25rem;">
               <h2 style="font-size:1.1rem; font-weight:700;">Image Generation</h2>
+              
+              <div class="form-group" style="margin-top:0.75rem;">
+                <label class="form-label" for="img-director-model">AI Visual Director (2-Step Pipeline)</label>
+                <select id="img-director-model" class="select-field">
+                  <option value="glm-4-6" ${s.imageGen.promptDirectorModel !== 'xialong-v1' && s.imageGen.promptDirectorModel !== 'off' ? 'selected' : ''}>GLM-4.6 (Recomendado — Alta fidelidad de escena y perfil)</option>
+                  <option value="xialong-v1" ${s.imageGen.promptDirectorModel === 'xialong-v1' ? 'selected' : ''}>Xialong-v1 (Rápido)</option>
+                  <option value="off" ${s.imageGen.promptDirectorModel === 'off' ? 'selected' : ''}>Desactivado (Solo etiquetas directas)</option>
+                </select>
+                <span class="form-hint">El LLM lee el diálogo y el perfil del personaje para sintetizar prompts especializados según la guía de NovelAI V5 (Global + Personaje aislado).</span>
+              </div>
+
               <div class="form-group">
                 <label class="form-label" for="img-size">Aspect Ratio Preset</label>
                 <select id="img-size" class="select-field">
@@ -4613,26 +4900,45 @@
       const inputEl = document.getElementById('chat-input');
       const customPrompt = inputEl && inputEl.value.trim() ? inputEl.value.trim() : '';
 
+      let sceneText = '';
       if (!targetMsg) {
-        // Insert a new visual message bubble from character
-        const promptText = customPrompt || `${char.name}, ${char.tagline}, cinematic scene`;
         if (inputEl && customPrompt) inputEl.value = '';
+        if (customPrompt) {
+          sceneText = customPrompt;
+        } else {
+          const recentMsgs = (chat.messages || []).slice(-3);
+          sceneText = recentMsgs.map(m => {
+            const t = m.alternatives[m.selectedIndex]?.text || '';
+            const sender = m.role === 'user' ? 'User' : (char?.name || 'Character');
+            return `${sender}: ${t.replace(/[*_#]/g, ' ').slice(0, 200)}`;
+          }).join('\n') || `${char?.name || 'Character'}, ${char?.tagline || 'cinematic scene'}`;
+        }
+
+        const promptSummary = customPrompt || sceneText.replace(/[\r\n]+/g, ' ').slice(0, 90);
         targetMsg = {
           id: 'msg_' + Date.now(),
           role: 'char',
           selectedIndex: 0,
           alternatives: [{
-            text: `*Visualizing scene: "${promptText}"*`,
-            imagePrompt: promptText,
+            text: `*Visualizing scene: "${promptSummary}"*`,
+            imagePrompt: promptSummary,
             imageLoading: true,
+            imageLoadingStatus: 'Directing visual scene with AI...',
             createdAt: Date.now()
           }]
         };
         chat.messages.push(targetMsg);
       } else {
         const alt = targetMsg.alternatives[targetMsg.selectedIndex];
-        alt.imagePrompt = alt.imagePrompt || alt.text.replace(/[*"]/g, '').slice(0, 90) || char.name;
+        const msgIdx = chat.messages.findIndex(m => m.id === targetMsg.id);
+        const prevMsg = msgIdx > 0 ? chat.messages[msgIdx - 1] : null;
+        const prevText = prevMsg ? (prevMsg.alternatives[prevMsg.selectedIndex]?.text || '') : '';
+        const thisText = alt.text || '';
+        sceneText = prevText ? `User: ${prevText.replace(/[*_#]/g, ' ').slice(0, 160)}\n${char?.name || 'Character'}: ${thisText.replace(/[*_#]/g, ' ').slice(0, 300)}` : thisText.replace(/[*_#]/g, ' ').slice(0, 400);
+
+        alt.imagePrompt = alt.imagePrompt || alt.text.replace(/[*"]/g, '').slice(0, 90) || char?.name || 'Scene';
         alt.imageLoading = true;
+        alt.imageLoadingStatus = 'Directing visual scene with AI...';
       }
 
       updateChatInStorage(chat);
@@ -4640,19 +4946,49 @@
 
       try {
         const alt = targetMsg.alternatives[targetMsg.selectedIndex];
+        const directorModel = settings?.imageGen?.promptDirectorModel || 'glm-4-6';
+
+        let globalPrompt = '';
+        let characterPrompt = '';
+
+        if (directorModel !== 'off') {
+          const modelLabel = directorModel === 'glm-4-6' ? 'GLM-4.6' : 'Xialong';
+          alt.imageLoadingStatus = `🧠 AI Art Director (${modelLabel}): Visualizing scene & character...`;
+          updateChatInStorage(chat);
+          await renderMainView();
+
+          const synth = await NovelAIVisualDirector.synthesizePrompt({
+            character: char,
+            sceneText,
+            settings
+          });
+          globalPrompt = synth.globalPrompt;
+          characterPrompt = synth.characterPrompt;
+        }
+
+        alt.imageLoadingStatus = '🎨 NovelAI Diffusion V5: Rendering illustration...';
+        alt.imagePrompt = characterPrompt ? `${characterPrompt} | ${globalPrompt}` : (globalPrompt || alt.imagePrompt);
+        updateChatInStorage(chat);
+        await renderMainView();
+
         const url = await API.generateImage({
-          prompt: `${settings.imageGen.stylePrefix}, ${alt.imagePrompt}`,
+          prompt: globalPrompt || `${settings.imageGen.stylePrefix}, ${alt.imagePrompt}`,
+          globalPrompt,
+          characterPrompt,
           character: char,
           settings
         });
+
         alt.imageUrl = url;
         alt.imageLoading = false;
+        delete alt.imageLoadingStatus;
         updateChatInStorage(chat);
         await renderMainView();
       } catch (err) {
         console.error('[AetherWeaver] Image generation error:', err);
         const alt = targetMsg.alternatives[targetMsg.selectedIndex];
         alt.imageLoading = false;
+        delete alt.imageLoadingStatus;
         try {
           updateChatInStorage(chat);
         } catch (storageErr) {
@@ -4825,6 +5161,7 @@
         s.advancedText.stopSequences = document.getElementById('adv-stops').value.split(',').map(x => x.trim().replace(/\\n/g, '\n')).filter(Boolean);
         s.advancedText.systemPromptOverride = document.getElementById('adv-sysprompt').value;
 
+        s.imageGen.promptDirectorModel = document.getElementById('img-director-model')?.value || 'glm-4-6';
         s.imageGen.sizePreset = document.getElementById('img-size').value;
         s.imageGen.stylePrefix = document.getElementById('img-prefix').value;
         s.imageGen.negativePrompt = document.getElementById('img-neg').value;
