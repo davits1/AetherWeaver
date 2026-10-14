@@ -1,0 +1,19 @@
+{
+  "name": "AetherWeaver — Roleplay & Character Studio",
+  "short_name": "AetherWeaver",
+  "description": "Personal offline-capable roleplay studio with NovelAI-style Memory, Author's Note, Lorebook, and scene generation.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

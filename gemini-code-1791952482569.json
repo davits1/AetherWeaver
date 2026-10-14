@@ -1,0 +1,14 @@
+{
+  "id": "msg_1720000001",
+  "role": "char",
+  "selectedIndex": 0,
+  "alternatives": [
+    {
+      "text": "*Anton narrows his eyes.* \"Shut the bulkhead.\"",
+      "imageUrl": "data:image/png;base64,...",
+      "imagePrompt": "orbital medbay quarantine",
+      "imageLoading": false,
+      "createdAt": 1720000001000
+    }
+  ]
+}
