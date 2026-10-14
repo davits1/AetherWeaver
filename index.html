@@ -697,6 +697,7 @@
       color: var(--text-secondary);
       display: -webkit-box;
       -webkit-line-clamp: 2;
+      line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
       line-height: 1.4;
@@ -2071,6 +2072,261 @@
     };
     /* NAI-TEXT:END */
 
+    /**
+     * ============================================================================
+     * INDEXEDDB IMAGE ASSET STORE (Unlimited Media Storage for PWA / Direct Web)
+     * ============================================================================
+     */
+    const ImageStore = {
+      _db: null,
+      _cache: new Map(), // key -> objectUrl (blob:...) or dataUrl
+      _initPromise: null,
+
+      init() {
+        if (this._initPromise) return this._initPromise;
+        this._initPromise = new Promise((resolve) => {
+          if (!window.indexedDB) {
+            console.warn('[ImageStore] IndexedDB not available, using in-memory store.');
+            return resolve();
+          }
+          try {
+            const req = indexedDB.open('aetherweaver_assets_v1', 1);
+            req.onupgradeneeded = (e) => {
+              const db = e.target.result;
+              if (!db.objectStoreNames.contains('images')) {
+                db.createObjectStore('images');
+              }
+            };
+            req.onsuccess = (e) => {
+              this._db = e.target.result;
+              resolve();
+            };
+            req.onerror = () => {
+              console.warn('[ImageStore] IndexedDB failed to open, using in-memory fallback.');
+              resolve();
+            };
+          } catch (e) {
+            console.warn('[ImageStore] Error opening IndexedDB:', e);
+            resolve();
+          }
+        });
+        return this._initPromise;
+      },
+
+      async save(key, blobOrDataUrl) {
+        if (!key) return null;
+        await this.init();
+        let blob = blobOrDataUrl;
+        if (typeof blobOrDataUrl === 'string' && blobOrDataUrl.startsWith('data:')) {
+          blob = this._dataUrlToBlob(blobOrDataUrl);
+        }
+        if (blob instanceof Blob) {
+          const objectUrl = URL.createObjectURL(blob);
+          this._cache.set(key, objectUrl);
+        } else if (typeof blobOrDataUrl === 'string') {
+          this._cache.set(key, blobOrDataUrl);
+        }
+
+        if (this._db) {
+          try {
+            await new Promise((resolve, reject) => {
+              const tx = this._db.transaction('images', 'readwrite');
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+              tx.objectStore('images').put(blob, key);
+            });
+          } catch (e) {
+            console.warn('[ImageStore] Failed to persist image to IndexedDB:', e);
+          }
+        }
+        return 'idb:' + key;
+      },
+
+      async get(key) {
+        if (this._cache.has(key)) return this._cache.get(key);
+        await this.init();
+        if (!this._db) return null;
+        return new Promise((resolve) => {
+          try {
+            const tx = this._db.transaction('images', 'readonly');
+            const req = tx.objectStore('images').get(key);
+            req.onsuccess = () => {
+              const val = req.result;
+              if (val instanceof Blob) {
+                const url = URL.createObjectURL(val);
+                this._cache.set(key, url);
+                resolve(url);
+              } else if (typeof val === 'string') {
+                this._cache.set(key, val);
+                resolve(val);
+              } else {
+                resolve(null);
+              }
+            };
+            req.onerror = () => resolve(null);
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+
+      async getAsDataUrl(key) {
+        const cached = this._cache.get(key);
+        if (typeof cached === 'string' && cached.startsWith('data:')) return cached;
+        await this.init();
+        if (!this._db) return cached || '';
+        return new Promise((resolve) => {
+          try {
+            const tx = this._db.transaction('images', 'readonly');
+            const req = tx.objectStore('images').get(key);
+            req.onsuccess = () => {
+              const val = req.result;
+              if (val instanceof Blob) {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = () => resolve('');
+                reader.readAsDataURL(val);
+              } else if (typeof val === 'string') {
+                resolve(val);
+              } else {
+                resolve('');
+              }
+            };
+            req.onerror = () => resolve('');
+          } catch {
+            resolve('');
+          }
+        });
+      },
+
+      resolveUrl(val) {
+        if (!val || typeof val !== 'string') return '';
+        if (val.startsWith('idb:')) {
+          const key = val.slice(4);
+          if (this._cache.has(key)) return this._cache.get(key);
+          this.get(key).then(loadedUrl => {
+            if (loadedUrl) {
+              document.querySelectorAll(`img[data-idb-key="${escapeHtml(key)}"]`).forEach(img => {
+                img.src = loadedUrl;
+              });
+            }
+          });
+          return '';
+        }
+        return val;
+      },
+
+      async preloadAll(chats, characters, personas) {
+        await this.init();
+        if (!this._db) return;
+        const keysToFetch = new Set();
+        const checkVal = (v) => {
+          if (typeof v === 'string' && v.startsWith('idb:')) {
+            const k = v.slice(4);
+            if (!this._cache.has(k)) keysToFetch.add(k);
+          }
+        };
+
+        (chats || []).forEach(c => c.messages?.forEach(m => m.alternatives?.forEach(a => checkVal(a.imageUrl))));
+        (characters || []).forEach(c => checkVal(c.avatar));
+        (personas || []).forEach(p => checkVal(p.avatar));
+
+        if (keysToFetch.size === 0) return;
+        await Promise.all(Array.from(keysToFetch).map(k => this.get(k)));
+      },
+
+      async migrateLocalStorage() {
+        try {
+          const chats = Storage.getChats();
+          let chatsChanged = false;
+          for (const chat of chats) {
+            for (const msg of (chat.messages || [])) {
+              for (const alt of (msg.alternatives || [])) {
+                if (alt.imageLoading) {
+                  alt.imageLoading = false;
+                  chatsChanged = true;
+                }
+                if (alt.imageUrl && typeof alt.imageUrl === 'string' && alt.imageUrl.startsWith('data:image/') && alt.imageUrl.length > 1000) {
+                  const key = 'migrated_scene_' + Math.random().toString(36).slice(2, 9);
+                  await this.save(key, alt.imageUrl);
+                  alt.imageUrl = 'idb:' + key;
+                  chatsChanged = true;
+                }
+              }
+            }
+          }
+          if (chatsChanged) {
+            Storage.saveChats(chats);
+            console.log('[ImageStore] Migrated chat images to IndexedDB and cleared stuck loading flags.');
+          }
+
+          const chars = Storage.getCharacters();
+          let charsChanged = false;
+          for (const char of chars) {
+            if (char.avatar && typeof char.avatar === 'string' && char.avatar.startsWith('data:image/') && char.avatar.length > 2000) {
+              const key = 'migrated_avatar_' + Math.random().toString(36).slice(2, 9);
+              await this.save(key, char.avatar);
+              char.avatar = 'idb:' + key;
+              charsChanged = true;
+            }
+          }
+          if (charsChanged) {
+            Storage.saveCharacters(chars);
+            console.log('[ImageStore] Migrated character avatars to IndexedDB.');
+          }
+        } catch (e) {
+          console.warn('[ImageStore] Storage migration warning:', e);
+        }
+      },
+
+      async exportAll() {
+        await this.init();
+        if (!this._db) return {};
+        return new Promise((resolve) => {
+          try {
+            const tx = this._db.transaction('images', 'readonly');
+            const store = tx.objectStore('images');
+            const req = store.getAllKeys();
+            req.onsuccess = async () => {
+              const keys = req.result || [];
+              const out = {};
+              for (const k of keys) {
+                out[k] = await this.getAsDataUrl(k);
+              }
+              resolve(out);
+            };
+            req.onerror = () => resolve({});
+          } catch {
+            resolve({});
+          }
+        });
+      },
+
+      async importAll(imagesMap) {
+        if (!imagesMap || typeof imagesMap !== 'object') return;
+        await this.init();
+        for (const [key, dataUrl] of Object.entries(imagesMap)) {
+          if (dataUrl && typeof dataUrl === 'string') {
+            await this.save(key, dataUrl);
+          }
+        }
+      },
+
+      _dataUrlToBlob(dataUrl) {
+        try {
+          const arr = dataUrl.split(',');
+          const mime = arr[0].match(/:(.*?);/)?.[1] || 'image/png';
+          const bstr = atob(arr[1]);
+          let n = bstr.length;
+          const u8arr = new Uint8Array(n);
+          while (n--) u8arr[n] = bstr.charCodeAt(n);
+          return new Blob([u8arr], { type: mime });
+        } catch {
+          return null;
+        }
+      }
+    };
+
     /* NAI-IMAGE:BEGIN — NovelAI image provider (used by API.generateImage and API.generateAvatar) */
     const NovelAIImage = {
       MODEL: 'nai-diffusion-5-full',
@@ -2273,12 +2529,25 @@
           ? 'https://image.novelai.net/ai/generate-image'
           : `${rawProxy || '/proxy'}/image/ai/generate-image`;
 
-        const res = await fetch(targetUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-          signal
-        });
+        const abortCtrl = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortCtrl.abort(new Error('Image generation timed out after 60 seconds'));
+        }, 60000);
+        if (signal) {
+          signal.addEventListener('abort', () => abortCtrl.abort(signal.reason), { once: true });
+        }
+
+        let res;
+        try {
+          res = await fetch(targetUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: abortCtrl.signal
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (!res.ok) {
           let errMsg = `Image generation failed (${res.status})`;
@@ -2292,7 +2561,10 @@
         if (isDirect) {
           const buf = await res.arrayBuffer();
           const pngBytes = await this.extractPngBytes(buf);
-          return this.bytesToDataUrl(pngBytes);
+          const blob = new Blob([pngBytes], { type: 'image/png' });
+          const key = (isAvatar ? 'avatar_' : 'scene_') + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+          await ImageStore.save(key, blob);
+          return 'idb:' + key;
         }
 
         const data = await res.json();
@@ -2757,7 +3029,24 @@
         }
       },
       saveCharacters(chars) {
-        localStorage.setItem(STORAGE_KEYS.CHARS, JSON.stringify(chars));
+        try {
+          localStorage.setItem(STORAGE_KEYS.CHARS, JSON.stringify(chars));
+        } catch (e) {
+          console.error('[Storage] Failed to save characters to localStorage:', e);
+          if (e.name === 'QuotaExceededError' || e.code === 22) {
+            try {
+              const safeChars = JSON.parse(JSON.stringify(chars));
+              safeChars.forEach(c => {
+                if (c.avatar && c.avatar.startsWith('data:image/') && c.avatar.length > 2000) {
+                  c.avatar = '';
+                }
+              });
+              localStorage.setItem(STORAGE_KEYS.CHARS, JSON.stringify(safeChars));
+            } catch (err2) {
+              console.error('[Storage] Emergency characters save failed:', err2);
+            }
+          }
+        }
       },
 
       getChats() {
@@ -2770,7 +3059,24 @@
         }
       },
       saveChats(chats) {
-        localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(chats));
+        try {
+          localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(chats));
+        } catch (e) {
+          console.error('[Storage] Failed to save chats to localStorage:', e);
+          if (e.name === 'QuotaExceededError' || e.code === 22) {
+            try {
+              const safeChats = JSON.parse(JSON.stringify(chats));
+              safeChats.forEach(c => c.messages?.forEach(m => m.alternatives?.forEach(a => {
+                if (a.imageUrl && a.imageUrl.startsWith('data:image/')) {
+                  a.imageUrl = '';
+                }
+              })));
+              localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(safeChats));
+            } catch (err2) {
+              console.error('[Storage] Emergency chat save failed:', err2);
+            }
+          }
+        }
       },
 
       getPersonas() {
@@ -2806,7 +3112,7 @@
             return defaults;
           }
           const parsed = JSON.parse(raw);
-          return {
+          const s = {
             ...defaults,
             ...parsed,
             advancedText: {
@@ -2819,11 +3125,10 @@
             imageGen: { ...defaults.imageGen, ...(parsed.imageGen || {}) },
             provider: { ...defaults.provider, ...(parsed.provider || {}) }
           };
-          // Automatically upgrade factory mock default to novelai
           if (!parsed.provider || parsed.provider.type === 'mock') {
-            settings.provider.type = 'novelai';
+            s.provider.type = 'novelai';
           }
-          return settings;
+          return s;
         } catch (e) {
           return getDefaultSettings();
         }
@@ -2832,7 +3137,7 @@
         localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
       },
 
-      exportAllData() {
+      async exportAllData() {
         return {
           version: 1,
           exportedAt: new Date().toISOString(),
@@ -2840,21 +3145,31 @@
           chats: this.getChats(),
           personas: this.getPersonas(),
           activePersonaId: this.getActivePersonaId(),
-          settings: this.getSettings()
+          settings: this.getSettings(),
+          images: await ImageStore.exportAll()
         };
       },
 
-      importAllData(payload) {
+      async importAllData(payload) {
         if (!payload || typeof payload !== 'object') throw new Error('Invalid backup file format.');
+        if (payload.images && typeof payload.images === 'object') {
+          await ImageStore.importAll(payload.images);
+        }
         if (Array.isArray(payload.characters)) this.saveCharacters(payload.characters);
         if (Array.isArray(payload.chats)) this.saveChats(payload.chats);
         if (Array.isArray(payload.personas)) this.savePersonas(payload.personas);
         if (payload.activePersonaId) this.setActivePersonaId(payload.activePersonaId);
         if (payload.settings) this.saveSettings(payload.settings);
+        await ImageStore.preloadAll(this.getChats(), this.getCharacters(), this.getPersonas());
       },
 
-      resetToDemo() {
+      async resetToDemo() {
         Object.values(STORAGE_KEYS).forEach(k => localStorage.removeItem(k));
+        if (window.indexedDB) {
+          try {
+            indexedDB.deleteDatabase('aetherweaver_assets_v1');
+          } catch {}
+        }
       }
     };
 
@@ -3145,7 +3460,7 @@
             const isActive = State.screen === 'chat' && State.activeChatId === chat.id;
             return `
               <div class="recent-sidebar-item ${isActive ? 'active' : ''}" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(c.id)}" role="button" tabindex="0">
-                <img class="avatar-sm" src="${c.avatar}" alt="${escapeHtml(c.name)}">
+                <img class="avatar-sm" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
                 <div class="recent-sidebar-info">
                   <div class="recent-sidebar-name">${escapeHtml(c.name)}</div>
                   <div class="recent-sidebar-preview">${escapeHtml(preview.replace(/[*"]/g, '').slice(0, 42))}</div>
@@ -3157,7 +3472,7 @@
 
         <div class="sidebar-footer">
           <div class="persona-pill" data-action="nav" data-screen="personas" title="Active Persona">
-            <img src="${persona.avatar}" alt="${escapeHtml(persona.name)}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;">
+            <img src="${ImageStore.resolveUrl(persona.avatar)}" ${persona.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(persona.avatar.slice(4))}"` : ''} alt="${escapeHtml(persona.name)}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;">
             <div style="min-width:0; flex:1;">
               <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(persona.name)}</div>
               <div style="font-size:0.7rem; color:var(--text-muted);">Active Persona</div>
@@ -3231,7 +3546,7 @@
                   const snippet = last ? (last.alternatives[last.selectedIndex]?.text || '') : '';
                   return `
                     <div class="recent-card" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}" role="button" tabindex="0">
-                      <img src="${ch.avatar}" alt="${escapeHtml(ch.name)}">
+                      <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}">
                       <div style="min-width:0; flex:1;">
                         <div style="font-weight:700; font-size:0.94rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(ch.name)}</div>
                         <div style="font-size:0.78rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(snippet.replace(/[*"]/g, '').slice(0, 38))}</div>
@@ -3257,7 +3572,7 @@
                 ${filteredChars.map(c => `
                   <article class="char-card" data-action="start-or-open-char" data-char-id="${escapeHtml(c.id)}" role="button" tabindex="0" aria-label="Chat with ${escapeHtml(c.name)}">
                     <div class="char-card-top">
-                      <img class="char-avatar-lg" src="${c.avatar}" alt="${escapeHtml(c.name)}">
+                      <img class="char-avatar-lg" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
                       <div class="char-card-meta">
                         <div class="char-card-name">${escapeHtml(c.name)}</div>
                         <div class="char-card-creator">by ${escapeHtml(c.creator || '@you')}</div>
@@ -3319,7 +3634,7 @@
           <div class="container-narrow">
             <div class="profile-card">
               <div class="profile-header">
-                <img class="profile-avatar" src="${char.avatar}" alt="${escapeHtml(char.name)}">
+                <img class="profile-avatar" src="${ImageStore.resolveUrl(char.avatar)}" ${char.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(char.avatar.slice(4))}"` : ''} alt="${escapeHtml(char.name)}">
                 <div class="profile-title-area">
                   <h1 style="font-size:1.5rem; font-weight:800;">${escapeHtml(char.name)}</h1>
                   <p style="color:var(--text-secondary); margin-top:0.25rem;">${escapeHtml(char.tagline)}</p>
@@ -3382,7 +3697,7 @@
               <div class="chat-header-left">
                 <button class="icon-btn" data-action="nav" data-screen="discover" aria-label="Back to Discover">${Icons.back}</button>
                 <div class="chat-header-char" data-action="view-profile" data-char-id="${escapeHtml(char.id)}" role="button" tabindex="0" title="View Character Profile">
-                  <img src="${char.avatar}" alt="${escapeHtml(char.name)}">
+                  <img src="${ImageStore.resolveUrl(char.avatar)}" ${char.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(char.avatar.slice(4))}"` : ''} alt="${escapeHtml(char.name)}">
                   <div style="min-width:0;">
                     <div style="font-weight:700; font-size:0.96rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(char.name)}</div>
                     <div style="font-size:0.74rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(chat.title)}</div>
@@ -3524,7 +3839,7 @@
 
       return `
         <div class="msg-row ${isUser ? 'user' : 'char'}" data-msg-id="${escapeHtml(msg.id)}">
-          <img class="msg-avatar" src="${senderAvatar}" alt="${escapeHtml(senderName)}">
+          <img class="msg-avatar" src="${ImageStore.resolveUrl(senderAvatar)}" ${senderAvatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(senderAvatar.slice(4))}"` : ''} alt="${escapeHtml(senderName)}">
           <div class="msg-content-wrap">
             <div class="msg-sender-line">
               <span class="msg-sender-name">${escapeHtml(senderName)}</span>
@@ -3551,7 +3866,7 @@
 
               ${activeAlt.imageUrl && !activeAlt.imageLoading ? `
                 <div class="msg-image-card">
-                  <img src="${activeAlt.imageUrl}" alt="${escapeHtml(activeAlt.imagePrompt || 'Generated scene')}">
+                  <img src="${ImageStore.resolveUrl(activeAlt.imageUrl)}" ${activeAlt.imageUrl.startsWith('idb:') ? `data-idb-key="${escapeHtml(activeAlt.imageUrl.slice(4))}"` : ''} alt="${escapeHtml(activeAlt.imagePrompt || 'Generated scene')}">
                   <div class="msg-image-meta">
                     <div><strong>Prompt:</strong> ${escapeHtml(activeAlt.imagePrompt || 'Scene illustration')}</div>
                     <div class="msg-image-actions">
@@ -3644,7 +3959,7 @@
                   return `
                     <div class="char-card" style="flex-direction:row; align-items:center; justify-content:space-between; gap:1rem;" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}">
                       <div style="display:flex; align-items:center; gap:0.85rem; min-width:0; flex:1;">
-                        <img src="${ch.avatar}" alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
+                        <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
                         <div style="min-width:0; flex:1;">
                           <div style="display:flex; align-items:center; gap:0.5rem;">
                             <span style="font-weight:700; font-size:0.98rem;">${escapeHtml(chat.title)}</span>
@@ -3720,7 +4035,7 @@
             <!-- Left Form -->
             <form id="char-editor-form" class="profile-card" onsubmit="return false;">
               <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
-                <img id="editor-avatar-preview" src="${draft.avatar}" alt="Avatar preview" style="width:88px;height:88px;border-radius:18px;object-fit:cover;border:2px solid var(--border);">
+                <img id="editor-avatar-preview" src="${ImageStore.resolveUrl(draft.avatar)}" alt="Avatar preview" style="width:88px;height:88px;border-radius:18px;object-fit:cover;border:2px solid var(--border);">
                 <div style="display:flex; flex-direction:column; gap:0.5rem;">
                   <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
                     <label class="btn btn-secondary" style="cursor:pointer;">
@@ -3789,7 +4104,7 @@
               <div class="form-label" style="margin-bottom:0.6rem;">Live Card Preview</div>
               <div class="char-card" style="cursor:default;">
                 <div class="char-card-top">
-                  <img id="preview-card-avatar" class="char-avatar-lg" src="${draft.avatar}" alt="Preview">
+                  <img id="preview-card-avatar" class="char-avatar-lg" src="${ImageStore.resolveUrl(draft.avatar)}" alt="Preview">
                   <div class="char-card-meta">
                     <div id="preview-card-name" class="char-card-name">${escapeHtml(draft.name || 'Unnamed Character')}</div>
                     <div class="char-card-creator">by ${escapeHtml(draft.creator || '@you')}</div>
@@ -3832,7 +4147,7 @@
                   <div class="profile-card" style="border-color:${isActive ? 'var(--accent)' : 'var(--border)'};" data-persona-id="${escapeHtml(p.id)}">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem;">
                       <div style="display:flex; align-items:center; gap:0.85rem;">
-                        <img src="${p.avatar}" alt="${escapeHtml(p.name)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;">
+                        <img src="${ImageStore.resolveUrl(p.avatar)}" ${p.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(p.avatar.slice(4))}"` : ''} alt="${escapeHtml(p.name)}" style="width:56px;height:56px;border-radius:50%;object-fit:cover;">
                         <div>
                           <div style="display:flex; align-items:center; gap:0.5rem;">
                             <strong style="font-size:1.05rem;">${escapeHtml(p.name)}</strong>
@@ -4290,6 +4605,11 @@
       const settings = Storage.getSettings();
 
       let targetMsg = msgId ? chat.messages.find(m => m.id === msgId) : null;
+      if (targetMsg && targetMsg.alternatives[targetMsg.selectedIndex]?.imageLoading) {
+        showToast('Image is already generating for this message.', 'info');
+        return;
+      }
+
       const inputEl = document.getElementById('chat-input');
       const customPrompt = inputEl && inputEl.value.trim() ? inputEl.value.trim() : '';
 
@@ -4330,9 +4650,14 @@
         updateChatInStorage(chat);
         await renderMainView();
       } catch (err) {
+        console.error('[AetherWeaver] Image generation error:', err);
         const alt = targetMsg.alternatives[targetMsg.selectedIndex];
         alt.imageLoading = false;
-        updateChatInStorage(chat);
+        try {
+          updateChatInStorage(chat);
+        } catch (storageErr) {
+          console.warn('[AetherWeaver] Storage update warning:', storageErr);
+        }
         await renderMainView();
         showToast('Image generation failed: ' + (err.message || 'Unknown error'), 'error', () => handleGenerateMessageImage(targetMsg.id));
       }
@@ -4432,10 +4757,13 @@
         const file = e.target.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = () => {
-          draft.avatar = reader.result;
-          avatarPreview.src = draft.avatar;
-          cardAvatar.src = draft.avatar;
+        reader.onload = async () => {
+          const dataUrl = reader.result;
+          const key = 'custom_avatar_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+          await ImageStore.save(key, dataUrl);
+          draft.avatar = 'idb:' + key;
+          avatarPreview.src = ImageStore.resolveUrl(draft.avatar);
+          cardAvatar.src = ImageStore.resolveUrl(draft.avatar);
         };
         reader.readAsDataURL(file);
       });
@@ -4448,9 +4776,11 @@
             character: { name: nameIn.value || 'Character', description: document.getElementById('ed-description').value }
           });
           draft.avatar = uri;
-          avatarPreview.src = uri;
-          cardAvatar.src = uri;
+          avatarPreview.src = ImageStore.resolveUrl(uri);
+          cardAvatar.src = ImageStore.resolveUrl(uri);
           showToast('Generated new character portrait.', 'success');
+        } catch (err) {
+          showToast('Failed to generate avatar: ' + (err.message || 'Unknown error'), 'error');
         } finally {
           genBtn.disabled = false;
           genBtn.innerHTML = `${Icons.sparkles} Generate Avatar`;
@@ -4829,10 +5159,11 @@
           const msg = chat?.messages.find(m => m.id === btn.getAttribute('data-msg-id'));
           const alt = msg?.alternatives[msg.selectedIndex];
           if (alt?.imageUrl) {
-            const isSvg = alt.imageUrl.endsWith('.svg') || alt.imageUrl.includes('image/svg');
+            const url = ImageStore.resolveUrl(alt.imageUrl);
+            const isSvg = url.endsWith('.svg') || url.includes('image/svg');
             const ext = isSvg ? 'svg' : 'png';
             const a = document.createElement('a');
-            a.href = alt.imageUrl;
+            a.href = url;
             a.download = `scene_${msg.id}.${ext}`;
             a.click();
           }
@@ -5186,14 +5517,15 @@
         }
 
         case 'export-all-data': {
-          downloadJsonFile(`aetherweaver_backup_${new Date().toISOString().slice(0, 10)}.json`, Storage.exportAllData());
+          const data = await Storage.exportAllData();
+          downloadJsonFile(`aetherweaver_backup_${new Date().toISOString().slice(0, 10)}.json`, data);
           showToast('Exported full backup JSON.', 'success');
           break;
         }
 
         case 'import-all-data': {
-          promptJsonImport((payload) => {
-            Storage.importAllData(payload);
+          promptJsonImport(async (payload) => {
+            await Storage.importAllData(payload);
             showToast('Backup restored!', 'success');
             renderMainView();
           });
@@ -5251,11 +5583,22 @@
      * ============================================================================
      */
     async function initApp() {
-      // Ensure seed characters & personas are initialized in localStorage on first run
-      Storage.getCharacters();
-      Storage.getPersonas();
+      // 1. Initialize IndexedDB store for images
+      await ImageStore.init();
+
+      // 2. Clear stuck loading flags and migrate legacy base64 images to IndexedDB
+      await ImageStore.migrateLocalStorage();
+
+      // 3. Ensure seed characters & personas are initialized in localStorage on first run
+      const chars = Storage.getCharacters();
+      const personas = Storage.getPersonas();
+      const chats = Storage.getChats();
       Storage.getSettings();
 
+      // 4. Preload all idb image blobs into memory cache for instantaneous sync rendering
+      await ImageStore.preloadAll(chats, chars, personas);
+
+      // 5. Render main view
       await renderMainView();
 
       if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
