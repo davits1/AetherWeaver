@@ -2426,7 +2426,8 @@
           '- Ends with ", no text".',
           '',
           '2. Character 1:',
-          '- Starts with gender/subject (e.g. "1woman" or "1man", "attractive male" if fitting).',
+          '- Starts with gender/subject (e.g. "1girl", "1boy", "1woman", "1man", "attractive male" if fitting).',
+          '- Character tag: If this is an established anime/game/pop-culture character, immediately include their canonical Danbooru character tag (e.g. "megumin (konosuba)", "satou kazuma", "hatsune miku", "2b (nier:automata)"). If this is an original character (OC), include their concise name (e.g. "lady maren").',
           '- Physical traits extracted from character description: hair color/style, eye color, facial features/scars, body build.',
           '- Exact clothing and accessories appropriate for the character and scene.',
           '- Pose, micro-actions, and facial expression matching the current scene.',
@@ -2530,7 +2531,8 @@
           '- Ends with ", no text".',
           '',
           '2. Character 1:',
-          '- Starts with gender/subject (e.g. "1woman" or "1man", "attractive male" if fitting), followed by "close-up portrait, looking at viewer".',
+          '- Starts with gender/subject (e.g. "1girl", "1boy", "1woman", "1man", "attractive male" if fitting), followed by "close-up portrait, looking at viewer".',
+          '- Character tag: If this is an established anime/game/pop-culture character, immediately include their canonical Danbooru character tag (e.g. "megumin (konosuba)", "satou kazuma", "hatsune miku", "2b (nier:automata)"). If this is an original character (OC), include their concise name (e.g. "lady maren").',
           '- Physical traits extracted from character description: hair color/style, eye color, facial features/scars, body build.',
           '- Clothing and accessories from character profile.',
           '- Facial expression matching character personality.',
@@ -2613,6 +2615,32 @@
         characterPrompt = characterPrompt.replace(/\s+/g, ' ').trim().replace(/,\s*$/, '');
         if (!characterPrompt && character) {
           characterPrompt = [character.name, character.tagline, character.description].filter(Boolean).join(', ');
+        }
+
+        // Safeguard: Ensure character identity tag or clean name is present in characterPrompt
+        if (character?.name && characterPrompt) {
+          const rawName = String(character.name).trim();
+          const cleanName = rawName
+            .replace(/\s*\([^)]*\)/g, '')
+            .replace(/\s+[-–—]\s+.*$/, '')
+            .replace(/^(?:Lord|Lady|Sir|Dame|Doctor|Dr\.|Professor|Prof\.|Commander|Captain)\s+/i, '')
+            .trim();
+          const baseToken = (cleanName.split(/\s+/)[0] || rawName.split(/\s+/)[0] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+          const promptLower = characterPrompt.toLowerCase();
+          const hasName = baseToken.length >= 3 && promptLower.includes(baseToken);
+
+          if (!hasName && (cleanName || rawName)) {
+            const nameToInject = (cleanName || rawName).toLowerCase();
+            const genderMatch = characterPrompt.match(/^(\d+(?:girl|boy|woman|man|person|female|male)[^,]*,\s*)/i);
+            if (genderMatch) {
+              const prefix = genderMatch[1];
+              const rest = characterPrompt.slice(prefix.length);
+              characterPrompt = `${prefix}${nameToInject}, ${rest}`;
+            } else {
+              characterPrompt = `${nameToInject}, ${characterPrompt}`;
+            }
+          }
         }
 
         return { globalPrompt, characterPrompt };
