@@ -1192,6 +1192,9 @@
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
+    .spin {
+      animation: spin 0.8s linear infinite;
+    }
 
     /* Chat Composer & Suggested Replies */
     .chat-composer-wrap {
@@ -1228,6 +1231,9 @@
       font-size: 0.8rem;
       color: var(--text-secondary);
       white-space: nowrap;
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
       transition: all 0.15s;
     }
     .suggestion-pill:hover {
@@ -3125,21 +3131,166 @@
        * @param {Object} params
        * @param {Character} params.character
        * @param {Message[]} params.messages
+       * @param {boolean} [params.useAi=false]
        * @returns {Promise<string[]>}
        */
-      async suggestReplies({ character, messages }) {
-        // NovelAI provider: no extra generation calls for suggestions.
-        let providerType = 'mock';
-        try { providerType = Storage.getSettings().provider.type; } catch (e) { /* default to mock */ }
-        if (providerType === 'novelai') return [];
-
-        await new Promise(r => setTimeout(r, 120));
+      async suggestReplies({ character, messages, useAi = false }) {
         const cname = character?.name || 'them';
-        return [
-          `*Look closely at ${cname} and ask what they're hiding.* "Tell me the whole truth."`,
-          `"Fair enough. What's our next step from here?"`,
-          `*Offer a wry smile and lean back.* "You don't expect me to agree that easily, do you?"`
-        ];
+
+        // Extract last few messages for context and language detection
+        const recentMsgs = (messages || []).slice(-4);
+        const combinedRecent = recentMsgs.map(m => m.alternatives?.[m.selectedIndex]?.text || '').join(' ');
+        const isSpanish = /[áéíóúñ¿¡]|\b(?:hola|qué|cómo|estás|por qué|gracias|bueno|bien|vamos|está|tregua|señor|dime|acuerdo|entendido|claro|espera)\b/i.test(combinedRecent || character?.description || '');
+
+        // Heuristic fallback pools (contextual and natural)
+        const getFallbackSuggestions = () => {
+          if (isSpanish) {
+            const pools = [
+              [
+                `*Observa a ${cname} con atención.* "¿Qué es lo que realmente estás pensando?"`,
+                `*Asiente despacio con una leve sonrisa.* "De acuerdo. ¿Cuál es nuestro siguiente movimiento?"`,
+                `*Da un paso al frente con calma.* "No esperarás que acepte tan fácilmente, ¿verdad?"`
+              ],
+              [
+                `*Cruza los brazos y arquea una ceja.* "Explícamelo otra vez, pero con calma."`,
+                `*Sonríe con complicidad.* "Tienes toda mi atención. Continúa."`,
+                `*Suspira y mantiene la mirada.* "Quizás tengas razón... pero no será sencillo."`
+              ],
+              [
+                `*Se acerca un poco más a ${cname}.* "Dime la verdad, sin rodeos."`,
+                `"Entendido. Si ese es el camino, cuenta conmigo."`,
+                `*Muestra una sonrisa desafiante.* "¿Acaso me estás poniendo a prueba?"`
+              ]
+            ];
+            return pools[Math.floor(Math.random() * pools.length)];
+          } else {
+            const pools = [
+              [
+                `*Look closely at ${cname} and ask what they're hiding.* "Tell me the whole truth."`,
+                `"Fair enough. What's our next step from here?"`,
+                `*Offer a wry smile and lean back.* "You don't expect me to agree that easily, do you?"`
+              ],
+              [
+                `*Cross arms with a curious grin.* "Explain that to me one more time."`,
+                `*Nod thoughtfully.* "You have my full attention. Go on."`,
+                `*Take a step closer.* "Are you testing me, or do you genuinely mean that?"`
+              ],
+              [
+                `*Sigh softly and maintain eye contact.* "Maybe you're right, but it won't be easy."`,
+                `"Understood. If that's the plan, count me in."`,
+                `*Raise an eyebrow.* "Don't tell me you were expecting me to say yes that fast."`
+              ]
+            ];
+            return pools[Math.floor(Math.random() * pools.length)];
+          }
+        };
+
+        // If useAi is false, return high-quality heuristic suggestions instantly
+        if (!useAi) {
+          return getFallbackSuggestions();
+        }
+
+        // AI Generation requested (e.g. from refresh-suggestions button)
+        let settings = null;
+        try { settings = Storage.getSettings(); } catch (e) { /* ignore */ }
+        const prov = settings?.provider || {};
+
+        if (prov.type === 'novelai') {
+          const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+          const rawProxy = String(prov.proxyBase || '').trim().replace(/\/+$/, '');
+          const isDirect = !rawProxy || (!isLocal && (rawProxy === '/proxy' || rawProxy === 'direct'));
+
+          const targetUrl = isDirect
+            ? 'https://text.novelai.net/oa/v1/completions'
+            : `${rawProxy || '/proxy'}/text/oa/v1/completions`;
+
+          const headers = { 'Content-Type': 'application/json' };
+          const tokenOverride = String(prov.apiKey || '').trim();
+          if (tokenOverride && !/^https?:\/\//i.test(tokenOverride)) {
+            headers['Authorization'] = `Bearer ${tokenOverride.replace(/^Bearer\s+/i, '')}`;
+          } else if (isDirect) {
+            return getFallbackSuggestions();
+          }
+
+          const persona = typeof getActivePersona === 'function' ? getActivePersona() : null;
+          const userLabel = persona?.name || 'User';
+
+          const contextLines = recentMsgs.map(m => {
+            const role = m.role === 'user' ? userLabel : cname;
+            const t = (m.alternatives?.[m.selectedIndex]?.text || '').trim();
+            return `${role}: ${t}`;
+          }).join('\n');
+
+          const langInstruction = isSpanish
+            ? 'Las opciones DEBEN estar en español.'
+            : 'Match the language of the conversation.';
+
+          const prompt = [
+            'You are an AI roleplay assistant for an interactive visual novel.',
+            `The user is playing as "${userLabel}" interacting with "${cname}".`,
+            'Given the character profile and recent dialogue, generate exactly 3 concise, distinct roleplay reply options for what the user could say or do next.',
+            langInstruction,
+            'Each option must be 1 short sentence combining actions in *asterisks* and dialogue in quotes.',
+            'Format strictly as:',
+            '1. <option 1>',
+            '2. <option 2>',
+            '3. <option 3>',
+            '',
+            `Character: ${cname}`,
+            character?.tagline ? `Tagline: ${character.tagline}` : '',
+            'Recent dialogue:',
+            contextLines || `${cname}: (waits for your response)`,
+            '',
+            'Replies:',
+            '1.'
+          ].filter(Boolean).join('\n');
+
+          const abortCtrl = new AbortController();
+          const timeoutId = setTimeout(() => abortCtrl.abort(new Error('Suggestion timeout')), 7000);
+
+          try {
+            const res = await fetch(targetUrl, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                model: 'glm-4-6',
+                prompt,
+                max_tokens: 120,
+                temperature: 0.8,
+                top_p: 0.9,
+                repetition_penalty: 1.05,
+                stop: ['\n4.', '\n\n', '---']
+              }),
+              signal: abortCtrl.signal
+            });
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const raw = ('1. ' + (data?.choices?.[0]?.text || '')).trim();
+
+            let parsed = raw
+              .split(/(?:^|\r?\n)\s*\d+[\.\)]\s*/)
+              .map(s => s.trim().replace(/^["']|["']$/g, ''))
+              .filter(s => s.length > 5);
+
+            if (parsed.length < 2) {
+              parsed = raw
+                .split(/\r?\n/)
+                .map(l => l.replace(/^[-*•\d\.\)]\s*/, '').trim().replace(/^["']|["']$/g, ''))
+                .filter(l => l.length > 5);
+            }
+
+            if (parsed.length >= 2) {
+              return parsed.slice(0, 3);
+            }
+          } catch (err) {
+            console.warn('[suggestReplies] AI suggestion call failed or timed out, using contextual fallback:', err);
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        }
+
+        return getFallbackSuggestions();
       }
     };
 
@@ -5574,7 +5725,9 @@
         }
 
         case 'use-suggestion': {
-          handleSendUserMessage(btn.getAttribute('data-text'));
+          const replyText = btn.getAttribute('data-text');
+          State.suggestedReplies = [];
+          handleSendUserMessage(replyText);
           break;
         }
 
@@ -5582,11 +5735,27 @@
           const chat = getActiveChat();
           const char = chat ? await API.getCharacter(chat.characterId) : null;
           if (chat && char) {
-            State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
-            const s = Storage.getSettings();
-            s.showSuggestions = true;
-            Storage.saveSettings(s);
-            renderMainView();
+            btn.classList.add('spin');
+            btn.disabled = true;
+            showToast('Generando sugerencias de respuesta...', 'info');
+            try {
+              State.suggestedReplies = await API.suggestReplies({
+                character: char,
+                messages: chat.messages,
+                useAi: true
+              });
+              const s = Storage.getSettings();
+              s.showSuggestions = true;
+              Storage.saveSettings(s);
+              await renderMainView();
+              showToast('Sugerencias actualizadas', 'success');
+            } catch (err) {
+              console.error('Error al actualizar sugerencias:', err);
+              showToast('No se pudieron generar sugerencias', 'error');
+            } finally {
+              btn.classList.remove('spin');
+              btn.disabled = false;
+            }
           }
           break;
         }
