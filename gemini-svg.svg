@@ -1,27 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
-  <defs>
-    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#131624"/>
-      <stop offset="50%" stop-color="#1d183b"/>
-      <stop offset="100%" stop-color="#0b0d12"/>
-    </linearGradient>
-    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#9175ff"/>
-      <stop offset="55%" stop-color="#7c5cff"/>
-      <stop offset="100%" stop-color="#00d2b4"/>
-    </linearGradient>
-  </defs>
+  <!-- Clean warm charcoal base -->
+  <rect width="512" height="512" rx="32" fill="#1A1714"/>
+  <rect x="24" y="24" width="464" height="464" rx="20" fill="none" stroke="#38322B" stroke-width="6"/>
 
-  <!-- Maskable safe-zone background -->
-  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <!-- Elegant open book base in copper/amber line style -->
+  <path d="M128 356 C176 336 216 342 256 360 C296 342 336 336 384 356 V196 C336 176 296 182 256 200 C216 182 176 176 128 196 Z" fill="none" stroke="#D98A4E" stroke-width="14" stroke-linejoin="round"/>
+  <line x1="256" y1="200" x2="256" y2="360" stroke="#D98A4E" stroke-width="14" stroke-linecap="round"/>
 
-  <!-- Subtle outer ring inside maskable safe zone (r <= 204) -->
-  <circle cx="256" cy="256" r="176" fill="none" stroke="url(#accentGrad)" stroke-width="10" stroke-opacity="0.35"/>
-
-  <!-- Stylized 'A' + Chat Quill Monogram -->
-  <path d="M168 356 L256 144 L344 356" fill="none" stroke="url(#accentGrad)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M198 292 H314" fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round"/>
-
-  <!-- Sparkle / Star Node at Apex -->
-  <circle cx="256" cy="144" r="18" fill="#00d2b4"/>
+  <!-- Stylized serif letter 'A' apex with warm antique ink accent -->
+  <path d="M216 296 L256 120 L296 296" fill="none" stroke="#E9E1D3" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="232" y1="250" x2="280" y2="250" stroke="#D98A4E" stroke-width="12" stroke-linecap="round"/>
 </svg>
