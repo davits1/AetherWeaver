@@ -1682,9 +1682,12 @@
         await new Promise(r => setTimeout(r, 120));
         const chars = Storage.getCharacters();
         const now = Date.now();
+        const isSeed = typeof isSeedCharacter === 'function' && isSeedCharacter(character.id);
         const saved = {
           ...character,
-          id: character.id || ('char_' + now + '_' + Math.random().toString(36).slice(2, 6)),
+          id: (!character.id || isSeed) ? ('char_' + now + '_' + Math.random().toString(36).slice(2, 6)) : character.id,
+          creator: isSeed ? '@you' : (character.creator || '@you'),
+          isCustom: true,
           updatedAt: now,
           chatCount: typeof character.chatCount === 'number' ? character.chatCount : 1
         };
@@ -2053,6 +2056,11 @@
       ];
     }
 
+    function isSeedCharacter(id) {
+      if (!id) return false;
+      return getSeedCharacters().some(sc => sc.id === id);
+    }
+
     const Storage = {
       getCharacters() {
         try {
@@ -2062,7 +2070,19 @@
             localStorage.setItem(STORAGE_KEYS.CHARS, JSON.stringify(seed));
             return seed;
           }
-          return JSON.parse(raw);
+          const chars = JSON.parse(raw);
+          const seedChars = getSeedCharacters();
+          let updated = false;
+          seedChars.forEach(seedChar => {
+            if (!chars.some(c => c.id === seedChar.id)) {
+              chars.push(seedChar);
+              updated = true;
+            }
+          });
+          if (updated) {
+            localStorage.setItem(STORAGE_KEYS.CHARS, JSON.stringify(chars));
+          }
+          return chars;
         } catch (e) {
           return getSeedCharacters();
         }
@@ -3859,29 +3879,56 @@
         }
 
         case 'edit-char': {
-          State.editorCharacterId = btn.getAttribute('data-char-id');
+          const charId = btn.getAttribute('data-char-id');
+          if (isSeedCharacter(charId)) {
+            const char = await API.getCharacter(charId);
+            if (!char) return;
+            const copyName = char.name.includes('(Copy)') ? char.name : `${char.name} (Copy)`;
+            const copy = await API.saveCharacter({
+              ...char,
+              id: '',
+              name: copyName,
+              creator: '@you',
+              chatCount: 0
+            });
+            showToast(`Created editable copy "${copy.name}".`, 'success');
+            State.editorCharacterId = copy.id;
+            State.screen = 'editor';
+            renderMainView();
+            break;
+          }
+          State.editorCharacterId = charId;
           State.screen = 'editor';
           renderMainView();
           break;
         }
 
         case 'duplicate-char': {
-          const char = await API.getCharacter(btn.getAttribute('data-char-id'));
+          e.stopPropagation();
+          const charId = btn.getAttribute('data-char-id');
+          const char = await API.getCharacter(charId);
           if (!char) return;
+          const copyName = char.name.includes('(Copy)') ? char.name : `${char.name} (Copy)`;
           const copy = await API.saveCharacter({
             ...char,
             id: '',
-            name: char.name + ' (Copy)',
-            chatCount: 1
+            name: copyName,
+            creator: '@you',
+            chatCount: 0
           });
-          showToast(`Duplicated as "${copy.name}".`, 'success');
+          showToast(`Cloned as "${copy.name}". Opening editor...`, 'success');
           State.editorCharacterId = copy.id;
+          State.screen = 'editor';
           renderMainView();
           break;
         }
 
         case 'delete-char': {
           const charId = btn.getAttribute('data-char-id');
+          if (isSeedCharacter(charId)) {
+            showToast('Default characters cannot be deleted.', 'warning');
+            return;
+          }
           const char = await API.getCharacter(charId);
           if (!char) return;
           showConfirmDialog({

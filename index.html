@@ -3161,9 +3161,12 @@
         await new Promise(r => setTimeout(r, 120));
         const chars = Storage.getCharacters();
         const now = Date.now();
+        const isSeed = typeof isSeedCharacter === 'function' && isSeedCharacter(character.id);
         const saved = {
           ...character,
-          id: character.id || ('char_' + now + '_' + Math.random().toString(36).slice(2, 6)),
+          id: (!character.id || isSeed) ? ('char_' + now + '_' + Math.random().toString(36).slice(2, 6)) : character.id,
+          creator: isSeed ? '@you' : (character.creator || '@you'),
+          isCustom: true,
           updatedAt: now,
           chatCount: typeof character.chatCount === 'number' ? character.chatCount : 1
         };
@@ -3774,6 +3777,11 @@
       ];
     }
 
+    function isSeedCharacter(id) {
+      if (!id) return false;
+      return getSeedCharacters().some(sc => sc.id === id);
+    }
+
     const Storage = {
       getCharacters() {
         try {
@@ -3784,8 +3792,16 @@
             return seed;
           }
           const chars = JSON.parse(raw);
-          const seedMap = new Map(getSeedCharacters().map(c => [c.id, c]));
+          const seedChars = getSeedCharacters();
+          const seedMap = new Map(seedChars.map(c => [c.id, c]));
           let updated = false;
+          // Ensure all default/seed characters are always available
+          seedChars.forEach(seedChar => {
+            if (!chars.some(c => c.id === seedChar.id)) {
+              chars.push(seedChar);
+              updated = true;
+            }
+          });
           chars.forEach(c => {
             const seed = seedMap.get(c.id);
             if (seed && (!c.avatar || c.avatar.startsWith('data:image/svg+xml') || c.avatar.includes('makeSvgAvatar'))) {
@@ -4339,7 +4355,10 @@
                     <div class="char-card-top">
                       <img class="char-avatar-lg" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
                       <div class="char-card-meta">
-                        <div class="char-card-name">${escapeHtml(c.name)}</div>
+                        <div class="char-card-name" style="display:flex; align-items:center; justify-content:space-between; gap:0.35rem;">
+                          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(c.name)}</span>
+                          ${!isSeedCharacter(c.id) ? `<span class="badge" style="font-size:0.65rem; padding:0.1rem 0.35rem; font-weight:700; flex-shrink:0;">Custom</span>` : ''}
+                        </div>
                         <div class="char-card-creator">by ${escapeHtml(c.creator || '@you')}</div>
                         <div class="char-card-tagline">${escapeHtml(c.tagline)}</div>
                       </div>
@@ -4348,8 +4367,11 @@
                       <div class="tag-badges">
                         ${(c.tags || []).slice(0, 3).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('')}
                       </div>
-                      <div style="display:flex; align-items:center; gap:0.5rem;">
+                      <div style="display:flex; align-items:center; gap:0.35rem;">
                         <span>${formatCount(c.chatCount)} chats</span>
+                        <button class="icon-btn" style="width:34px;height:34px;" data-action="duplicate-char" data-char-id="${escapeHtml(c.id)}" aria-label="Clone ${escapeHtml(c.name)}" title="Clone Character">
+                          ${Icons.copy}
+                        </button>
                         <button class="icon-btn" style="width:34px;height:34px;" data-action="view-profile" data-char-id="${escapeHtml(c.id)}" aria-label="View profile for ${escapeHtml(c.name)}" title="Character Profile">
                           ${Icons.more}
                         </button>
@@ -4392,7 +4414,12 @@
             <div class="top-bar-title">Character Profile</div>
           </div>
           <div style="display:flex; gap:0.5rem;">
-            <button class="btn btn-secondary" data-action="edit-char" data-char-id="${escapeHtml(char.id)}">${Icons.edit} <span>Edit</span></button>
+            ${isSeedCharacter(char.id) ? `
+              <button class="btn btn-primary" data-action="duplicate-char" data-char-id="${escapeHtml(char.id)}">${Icons.copy} <span>Clone & Edit</span></button>
+            ` : `
+              <button class="btn btn-secondary" data-action="duplicate-char" data-char-id="${escapeHtml(char.id)}" title="Duplicate">${Icons.copy} <span>Duplicate</span></button>
+              <button class="btn btn-secondary" data-action="edit-char" data-char-id="${escapeHtml(char.id)}">${Icons.edit} <span>Edit</span></button>
+            `}
           </div>
         </div>
         <div class="screen-scroll">
@@ -4407,6 +4434,9 @@
                     <span>Creator: <strong>${escapeHtml(char.creator || '@you')}</strong></span>
                     <span>Interactions: <strong>${formatCount(char.chatCount)}</strong></span>
                     <span>Visibility: <strong>${escapeHtml(char.visibility || 'public')}</strong></span>
+                    <span class="badge" style="${isSeedCharacter(char.id) ? 'background:var(--accent-subtle); color:var(--accent); font-weight:600;' : 'background:var(--bg-card); border:1px solid var(--border); font-weight:600;'}">
+                      ${isSeedCharacter(char.id) ? 'Default Character' : 'Custom / Local Copy'}
+                    </span>
                   </div>
                   <div class="tag-badges" style="margin-top:0.65rem; flex-wrap:wrap;">
                     ${(char.tags || []).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('')}
@@ -4419,8 +4449,18 @@
                 ${charChats.length > 0 ? `
                   <button class="btn btn-secondary" data-action="open-chat" data-chat-id="${escapeHtml(charChats[0].id)}" data-char-id="${escapeHtml(char.id)}">Continue Latest Chat (${charChats.length})</button>
                 ` : ''}
+                <button class="btn btn-secondary" data-action="duplicate-char" data-char-id="${escapeHtml(char.id)}">${Icons.copy} ${isSeedCharacter(char.id) ? 'Clone & Edit' : 'Duplicate'}</button>
                 <button class="btn btn-secondary" data-action="export-char" data-char-id="${escapeHtml(char.id)}">${Icons.download} Export JSON</button>
+                ${!isSeedCharacter(char.id) ? `
+                  <button class="btn btn-danger" data-action="delete-char" data-char-id="${escapeHtml(char.id)}">${Icons.trash} Delete</button>
+                ` : ''}
               </div>
+              ${isSeedCharacter(char.id) ? `
+                <div style="font-size:0.83rem; color:var(--text-secondary); background:var(--bg-subtle, rgba(0,0,0,0.02)); border:1px solid var(--border); border-radius:10px; padding:0.6rem 0.85rem; margin-top:0.75rem; display:flex; align-items:center; gap:0.5rem;">
+                  <span style="display:flex; color:var(--accent);">${Icons.copy}</span>
+                  <span><strong>Default Character:</strong> Click <strong>Clone & Edit</strong> to create your own editable local copy. The original character remains unchanged.</span>
+                </div>
+              ` : ''}
 
               <div>
                 <div class="form-label" style="margin-bottom:0.4rem;">Opening Greeting</div>
@@ -4768,7 +4808,8 @@
 
     async function renderEditorScreen(main) {
       const existing = State.editorCharacterId ? await API.getCharacter(State.editorCharacterId) : null;
-      const draft = existing || {
+      const isSeed = existing ? isSeedCharacter(existing.id) : false;
+      const draft = existing ? JSON.parse(JSON.stringify(existing)) : {
         id: '',
         name: '',
         tagline: '',
@@ -4786,14 +4827,14 @@
         <div class="top-bar">
           <div style="display:flex; align-items:center; gap:0.5rem;">
             <button class="icon-btn" data-action="nav" data-screen="discover" aria-label="Back">${Icons.back}</button>
-            <div class="top-bar-title">${existing ? `Edit ${escapeHtml(existing.name)}` : 'Create Character'}</div>
+            <div class="top-bar-title">${existing ? (isSeed ? `Clone & Customize ${escapeHtml(existing.name)}` : `Edit ${escapeHtml(existing.name)}`) : 'Create Character'}</div>
           </div>
           <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
             <button class="btn btn-secondary" data-action="import-char-json">${Icons.upload} <span>Import JSON</span></button>
             ${existing ? `
               <button class="btn btn-secondary" data-action="duplicate-char" data-char-id="${escapeHtml(existing.id)}">${Icons.copy} <span>Duplicate</span></button>
               <button class="btn btn-secondary" data-action="export-char" data-char-id="${escapeHtml(existing.id)}">${Icons.download} <span>Export</span></button>
-              <button class="btn btn-danger" data-action="delete-char" data-char-id="${escapeHtml(existing.id)}">${Icons.trash}</button>
+              ${!isSeed ? `<button class="btn btn-danger" data-action="delete-char" data-char-id="${escapeHtml(existing.id)}" title="Delete Character">${Icons.trash}</button>` : ''}
             ` : ''}
           </div>
         </div>
@@ -4802,6 +4843,12 @@
           <div class="container-wide two-col-grid">
             <!-- Left Form -->
             <form id="char-editor-form" class="profile-card" onsubmit="return false;">
+              ${isSeed ? `
+                <div style="background:var(--accent-subtle, rgba(232, 117, 0, 0.08)); border:1px solid var(--accent, #e87500); border-radius:10px; padding:0.65rem 0.9rem; font-size:0.85rem; color:var(--text-primary); margin-bottom:1rem; display:flex; align-items:center; gap:0.5rem;">
+                  <span style="display:flex; color:var(--accent);">${Icons.copy}</span>
+                  <span><strong>Default Character Template:</strong> Modifying and saving will store this as your own custom local copy, preserving the original default character.</span>
+                </div>
+              ` : ''}
               <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
                 <img id="editor-avatar-preview" src="${ImageStore.resolveUrl(draft.avatar)}" alt="Avatar preview" style="width:88px;height:88px;border-radius:18px;object-fit:cover;border:2px solid var(--border);">
                 <div style="display:flex; flex-direction:column; gap:0.5rem;">
@@ -5851,29 +5898,57 @@
         }
 
         case 'edit-char': {
-          State.editorCharacterId = btn.getAttribute('data-char-id');
+          const charId = btn.getAttribute('data-char-id');
+          if (isSeedCharacter(charId)) {
+            // For seed characters, automatically clone into an editable custom copy
+            const char = await API.getCharacter(charId);
+            if (!char) return;
+            const copyName = char.name.includes('(Copy)') ? char.name : `${char.name} (Copy)`;
+            const copy = await API.saveCharacter({
+              ...char,
+              id: '',
+              name: copyName,
+              creator: '@you',
+              chatCount: 0
+            });
+            showToast(`Created editable copy "${copy.name}".`, 'success');
+            State.editorCharacterId = copy.id;
+            State.screen = 'editor';
+            renderMainView();
+            break;
+          }
+          State.editorCharacterId = charId;
           State.screen = 'editor';
           renderMainView();
           break;
         }
 
         case 'duplicate-char': {
-          const char = await API.getCharacter(btn.getAttribute('data-char-id'));
+          e.stopPropagation();
+          const charId = btn.getAttribute('data-char-id');
+          const char = await API.getCharacter(charId);
           if (!char) return;
+          const copyName = char.name.includes('(Copy)') ? char.name : `${char.name} (Copy)`;
           const copy = await API.saveCharacter({
             ...char,
             id: '',
-            name: char.name + ' (Copy)',
-            chatCount: 1
+            name: copyName,
+            creator: '@you',
+            chatCount: 0
           });
-          showToast(`Duplicated as "${copy.name}".`, 'success');
+          showToast(`Cloned as "${copy.name}". Opening editor...`, 'success');
           State.editorCharacterId = copy.id;
+          State.screen = 'editor';
           renderMainView();
           break;
         }
 
         case 'delete-char': {
           const charId = btn.getAttribute('data-char-id');
+          if (isSeedCharacter(charId)) {
+            showToast('Default characters cannot be deleted.', 'warning');
+            return;
+          }
           const char = await API.getCharacter(charId);
           if (!char) return;
           showConfirmDialog({
