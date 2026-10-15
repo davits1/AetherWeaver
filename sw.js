@@ -2,7 +2,7 @@
 // - Network-first for same-origin app files (fresh code whenever online, cache as offline fallback)
 // - Never touches /proxy/ requests (API traffic must not be cached or intercepted)
 // - Bump CACHE_NAME whenever this file's caching behavior changes
-const CACHE_NAME = 'aetherweaver-shell-v10';
+const CACHE_NAME = 'aetherweaver-shell-v11';
 const APP_SHELL = [
   './',
   './index.html',

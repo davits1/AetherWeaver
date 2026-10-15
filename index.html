@@ -1479,11 +1479,44 @@
        RESPONSIVE BREAKPOINTS (MOBILE <= 840px)
        ========================================================================== */
     @media (max-width: 840px) {
-      #sidebar { display: none; }
-      #bottom-nav { display: block; }
-      body.in-chat #bottom-nav { display: none; }
+      #app-shell {
+        flex-direction: column;
+        width: 100%;
+        height: 100dvh;
+        overflow: hidden;
+      }
 
-      .screen-scroll { padding: 1rem; }
+      #sidebar {
+        display: none !important;
+        width: 0 !important;
+      }
+
+      #main-view {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        height: auto;
+      }
+
+      #bottom-nav {
+        display: block !important;
+        width: 100%;
+        flex-shrink: 0;
+        position: relative;
+        z-index: 40;
+        border-top: 1px solid var(--border);
+        background-color: var(--bg-surface);
+      }
+
+      body.in-chat #bottom-nav {
+        display: none !important;
+      }
+
+      .screen-scroll {
+        padding: 1rem;
+        padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+      }
+
       .two-col-grid { grid-template-columns: 1fr; }
       .char-grid { grid-template-columns: 1fr; }
 
@@ -1500,6 +1533,18 @@
         border-radius: 20px 20px 0 0;
         box-shadow: var(--shadow-lg);
         z-index: 80;
+      }
+
+      #context-drawer.hidden {
+        display: none !important;
+      }
+
+      .msg-image-card {
+        max-width: 100%;
+      }
+
+      .chat-header-actions .btn span {
+        display: none;
       }
 
       #toast-container {
