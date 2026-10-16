@@ -2,7 +2,7 @@
 // - Network-first for same-origin app files (fresh code whenever online, cache as offline fallback)
 // - Never touches /proxy/ requests (API traffic must not be cached or intercepted)
 // - Bump CACHE_NAME whenever this file's caching behavior changes
-const CACHE_NAME = 'aetherweaver-shell-v16';
+const CACHE_NAME = 'aetherweaver-shell-v17';
 const APP_SHELL = [
   './',
   './index.html',
@@ -14,7 +14,11 @@ const APP_SHELL = [
   './avatars/kazimir.png',
   './avatars/soren.png',
   './avatars/architect.png',
-  './avatars/tamsin.png'
+  './avatars/tamsin.png',
+  './avatars/Gale.png',
+  './avatars/Anders.png',
+  './avatars/Fenris.png',
+  './avatars/Megumin.png'
 ];
 
 self.addEventListener('install', (event) => {
