@@ -4032,10 +4032,27 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           });
           chars.forEach(c => {
             const seed = seedMap.get(c.id);
-            if (seed && (!c.avatar || c.avatar.startsWith('data:image/svg+xml') || c.avatar.includes('makeSvgAvatar'))) {
-              c.avatar = seed.avatar;
-              c.description = seed.description;
-              updated = true;
+            if (seed && !c.isCustom) {
+              if (c.avatar !== seed.avatar && (!c.avatar || c.avatar.startsWith('data:image/svg+xml') || c.avatar.includes('makeSvgAvatar'))) {
+                c.avatar = seed.avatar;
+                updated = true;
+              }
+              if (c.description !== seed.description) {
+                c.description = seed.description;
+                updated = true;
+              }
+              if (c.greeting !== seed.greeting) {
+                c.greeting = seed.greeting;
+                updated = true;
+              }
+              if (c.tagline !== seed.tagline) {
+                c.tagline = seed.tagline;
+                updated = true;
+              }
+              if (c.exampleDialogue !== seed.exampleDialogue) {
+                c.exampleDialogue = seed.exampleDialogue;
+                updated = true;
+              }
             }
           });
           if (updated) {
