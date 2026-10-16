@@ -1,8 +1,10 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark" data-font="medium" data-density="comfortable">
+
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#1A1714">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -53,7 +55,8 @@
     /* ==========================================================================
        CSS VARIABLES & THEME TOKENS
        ========================================================================== */
-    :root, [data-theme="dark"] {
+    :root,
+    [data-theme="dark"] {
       --font-serif: "Iowan Old Style", "Palatino Linotype", "URW Palladio L", P052, Palatino, Georgia, serif;
       --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
@@ -122,25 +125,50 @@
       --text-on-accent: #FAF7F2;
     }
 
-    [data-font="small"] { --font-scale: 0.95rem; --msg-line-height: 1.55; }
-    [data-font="medium"] { --font-scale: 1.05rem; --msg-line-height: 1.65; }
-    [data-font="large"] { --font-scale: 1.15rem; --msg-line-height: 1.75; }
+    [data-font="small"] {
+      --font-scale: 0.95rem;
+      --msg-line-height: 1.55;
+    }
 
-    [data-density="compact"] { --msg-gap: 0.6rem; --msg-pad: 0.65rem 0.9rem; }
-    [data-density="comfortable"] { --msg-gap: 1.1rem; --msg-pad: 0.9rem 1.2rem; }
-    [data-density="spacious"] { --msg-gap: 1.6rem; --msg-pad: 1.2rem 1.45rem; }
+    [data-font="medium"] {
+      --font-scale: 1.05rem;
+      --msg-line-height: 1.65;
+    }
+
+    [data-font="large"] {
+      --font-scale: 1.15rem;
+      --msg-line-height: 1.75;
+    }
+
+    [data-density="compact"] {
+      --msg-gap: 0.6rem;
+      --msg-pad: 0.65rem 0.9rem;
+    }
+
+    [data-density="comfortable"] {
+      --msg-gap: 1.1rem;
+      --msg-pad: 0.9rem 1.2rem;
+    }
+
+    [data-density="spacious"] {
+      --msg-gap: 1.6rem;
+      --msg-pad: 1.2rem 1.45rem;
+    }
 
     /* ==========================================================================
        RESET & BASE LAYOUT
        ========================================================================== */
-    *, *::before, *::after {
+    *,
+    *::before,
+    *::after {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
       -webkit-tap-highlight-color: transparent;
     }
 
-    html, body {
+    html,
+    body {
       width: 100%;
       height: 100dvh;
       overflow: hidden;
@@ -153,12 +181,22 @@
       -moz-osx-font-smoothing: grayscale;
     }
 
-    h1, h2, h3, h4, .section-title, .top-bar-title, .brand-logo, #modal-title {
+    h1,
+    h2,
+    h3,
+    h4,
+    .section-title,
+    .top-bar-title,
+    .brand-logo,
+    #modal-title {
       font-family: var(--font-serif);
       letter-spacing: -0.01em;
     }
 
-    button, input, select, textarea {
+    button,
+    input,
+    select,
+    textarea {
       font-family: inherit;
       font-size: inherit;
       color: inherit;
@@ -182,10 +220,23 @@
     }
 
     /* Scrollbars */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-xs); }
-    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: var(--radius-xs);
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
 
     /* ==========================================================================
        APP SHELL (SIDEBAR + MAIN + BOTTOM NAV)
@@ -226,7 +277,8 @@
       user-select: none;
     }
 
-    .brand-wordmark, .brand-logo span {
+    .brand-wordmark,
+    .brand-logo span {
       font-family: var(--font-serif);
       font-size: 1.35rem;
       font-weight: 700;
@@ -481,13 +533,18 @@
       white-space: nowrap;
     }
 
-    .btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+    .btn svg {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+    }
 
     .btn-primary {
       background-color: var(--accent);
       color: var(--text-on-accent);
       border-color: var(--accent);
     }
+
     .btn-primary:hover {
       background-color: var(--accent-hover);
       border-color: var(--accent-hover);
@@ -498,6 +555,7 @@
       color: var(--text-primary);
       border: 1px solid var(--border);
     }
+
     .btn-secondary:hover {
       background-color: var(--bg-elevated-hover);
       border-color: var(--border-focus);
@@ -508,6 +566,7 @@
       color: var(--danger);
       border: 1px solid var(--danger);
     }
+
     .btn-danger:hover {
       background-color: var(--danger);
       color: #FAF7F2;
@@ -518,6 +577,7 @@
       color: var(--text-secondary);
       border: 1px solid transparent;
     }
+
     .btn-ghost:hover {
       background-color: var(--bg-elevated);
       border-color: var(--border);
@@ -536,12 +596,17 @@
       transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
       flex-shrink: 0;
     }
+
     .icon-btn:hover {
       background-color: var(--bg-elevated);
       border-color: var(--border);
       color: var(--text-primary);
     }
-    .icon-btn svg { width: 20px; height: 20px; }
+
+    .icon-btn svg {
+      width: 20px;
+      height: 20px;
+    }
 
     .mini-btn {
       display: inline-flex;
@@ -558,13 +623,16 @@
       color: var(--text-secondary);
       transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
     }
+
     .mini-btn:hover {
       color: var(--text-primary);
       border-color: var(--accent);
       background-color: var(--bg-elevated-hover);
     }
 
-    .input-field, .textarea-field, .select-field {
+    .input-field,
+    .textarea-field,
+    .select-field {
       width: 100%;
       min-height: 42px;
       padding: 0.65rem 0.9rem;
@@ -582,7 +650,9 @@
       line-height: 1.5;
     }
 
-    .input-field:focus, .textarea-field:focus, .select-field:focus {
+    .input-field:focus,
+    .textarea-field:focus,
+    .select-field:focus {
       outline: none;
       border-color: var(--accent);
     }
@@ -688,7 +758,10 @@
       padding-bottom: 0.25rem;
       scrollbar-width: none;
     }
-    .chip-row::-webkit-scrollbar { display: none; }
+
+    .chip-row::-webkit-scrollbar {
+      display: none;
+    }
 
     .chip {
       display: inline-flex;
@@ -998,7 +1071,10 @@
       border-radius: var(--radius-sm);
       transition: background-color 150ms ease;
     }
-    .chat-header-char:hover { background-color: var(--bg-elevated); }
+
+    .chat-header-char:hover {
+      background-color: var(--bg-elevated);
+    }
 
     .chat-header-char img {
       width: 38px;
@@ -1049,9 +1125,19 @@
       transition: background-color 150ms ease, color 150ms ease;
     }
 
-    .dropdown-item:hover { background-color: var(--bg-elevated); }
-    .dropdown-item.danger { color: var(--danger); }
-    .dropdown-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+    .dropdown-item:hover {
+      background-color: var(--bg-elevated);
+    }
+
+    .dropdown-item.danger {
+      color: var(--danger);
+    }
+
+    .dropdown-item svg {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+    }
 
     /* Message Stream (Novel / Script Reading Layout) */
     #chat-messages {
@@ -1184,6 +1270,7 @@
       margin-bottom: 0.75rem;
       line-height: inherit;
     }
+
     .msg-bubble p:last-child {
       margin-bottom: 0;
     }
@@ -1282,10 +1369,12 @@
       color: var(--text-secondary);
       transition: background-color 150ms ease, color 150ms ease;
     }
+
     .swipe-btn:hover:not(:disabled) {
       background-color: var(--bg-elevated);
       color: var(--text-primary);
     }
+
     .swipe-btn:disabled {
       opacity: 0.35;
       cursor: not-allowed;
@@ -1321,12 +1410,17 @@
       font-family: var(--font-sans);
       transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
     }
+
     .msg-act-btn:hover {
       background-color: var(--bg-elevated);
       border-color: var(--border);
       color: var(--text-primary);
     }
-    .msg-act-btn svg { width: 15px; height: 15px; }
+
+    .msg-act-btn svg {
+      width: 15px;
+      height: 15px;
+    }
 
     /* Typing & Skeleton Loading (No bounce, no shimmer gradients) */
     .typing-dots {
@@ -1335,6 +1429,7 @@
       gap: 5px;
       padding: 0.35rem 0.25rem;
     }
+
     .typing-dots span {
       width: 6px;
       height: 6px;
@@ -1342,12 +1437,27 @@
       background-color: var(--accent);
       animation: typingPulse 1.4s infinite ease-in-out;
     }
-    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    .typing-dots span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing-dots span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
 
     @keyframes typingPulse {
-      0%, 100% { opacity: 0.3; transform: scale(0.9); }
-      50% { opacity: 1; transform: scale(1); }
+
+      0%,
+      100% {
+        opacity: 0.3;
+        transform: scale(0.9);
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1);
+      }
     }
 
     .skeleton-box {
@@ -1365,13 +1475,23 @@
     }
 
     @keyframes skeletonPulse {
-      0%, 100% { opacity: 0.6; }
-      50% { opacity: 1; }
+
+      0%,
+      100% {
+        opacity: 0.6;
+      }
+
+      50% {
+        opacity: 1;
+      }
     }
 
     @keyframes spin {
-      to { transform: rotate(360deg); }
+      to {
+        transform: rotate(360deg);
+      }
     }
+
     .spin {
       animation: spin 0.8s linear infinite;
     }
@@ -1400,7 +1520,10 @@
       padding-bottom: 0.2rem;
       scrollbar-width: none;
     }
-    .suggestions-bar::-webkit-scrollbar { display: none; }
+
+    .suggestions-bar::-webkit-scrollbar {
+      display: none;
+    }
 
     .suggestion-pill {
       padding: 0.4rem 0.8rem;
@@ -1417,6 +1540,7 @@
       user-select: none;
       transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
     }
+
     .suggestion-pill:hover {
       border-color: var(--accent);
       background-color: var(--bg-elevated);
@@ -1445,6 +1569,7 @@
       overflow-y: auto;
       transition: border-color 150ms ease;
     }
+
     #chat-input:focus {
       outline: none;
       border-color: var(--accent);
@@ -1575,8 +1700,13 @@
       font-size: 0.88rem;
     }
 
-    .toast.error { border-left-color: var(--danger); }
-    .toast.success { border-left-color: var(--success); }
+    .toast.error {
+      border-left-color: var(--danger);
+    }
+
+    .toast.success {
+      border-left-color: var(--success);
+    }
 
     /* ==========================================================================
        FORMS, COLLAPSIBLE PANELS, GRIDS
@@ -1596,7 +1726,7 @@
       margin-bottom: 1.25rem;
     }
 
-    details.collapsible-panel > summary {
+    details.collapsible-panel>summary {
       padding: 0.85rem 1.25rem;
       font-family: var(--font-serif);
       font-size: 1.05rem;
@@ -1612,11 +1742,13 @@
       transition: background-color 150ms ease;
     }
 
-    details.collapsible-panel[open] > summary {
+    details.collapsible-panel[open]>summary {
       border-bottom-color: var(--border);
     }
 
-    details.collapsible-panel > summary::-webkit-details-marker { display: none; }
+    details.collapsible-panel>summary::-webkit-details-marker {
+      display: none;
+    }
 
     .panel-content {
       padding: 1.25rem;
@@ -1662,6 +1794,7 @@
       transition: background-color 150ms ease, border-color 150ms ease;
       flex-shrink: 0;
     }
+
     .switch-input::after {
       content: "";
       position: absolute;
@@ -1673,10 +1806,12 @@
       background-color: var(--text-secondary);
       transition: transform 150ms ease, background-color 150ms ease;
     }
+
     .switch-input:checked {
       background-color: var(--accent);
       border-color: var(--accent);
     }
+
     .switch-input:checked::after {
       transform: translateX(18px);
       background-color: var(--text-on-accent);
@@ -1684,7 +1819,10 @@
 
     /* Accessibility: Reduced Motion */
     @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
+
+      *,
+      *::before,
+      *::after {
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
@@ -1734,8 +1872,13 @@
         padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
       }
 
-      .two-col-grid { grid-template-columns: 1fr; }
-      .char-grid { grid-template-columns: 1fr; }
+      .two-col-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .char-grid {
+        grid-template-columns: 1fr;
+      }
 
       /* Context Drawer becomes a clean bottom sheet on mobile */
       #context-drawer {
@@ -1772,6 +1915,7 @@
     }
   </style>
 </head>
+
 <body>
   <div id="app-shell">
     <!-- Left Sidebar (Desktop) -->
@@ -2686,7 +2830,7 @@
             try {
               const errJson = await res.json();
               msg = errJson.message || errJson.error || msg;
-            } catch {}
+            } catch { }
             throw new Error(msg);
           }
 
@@ -2990,7 +3134,7 @@
               return out;
             }
           }
-        } catch (e) {}
+        } catch (e) { }
         // Case 3: ZIP archive (magic bytes: 50 4B 03 04)
         if (bytes.length >= 30 && bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04) {
           const view = new DataView(arrayBuffer);
@@ -3098,7 +3242,7 @@
           try {
             const errData = await res.json();
             errMsg = errData.message || errData.error || errMsg;
-          } catch {}
+          } catch { }
           throw new Error(errMsg);
         }
 
@@ -3731,7 +3875,7 @@
 Appearance: handsome in a rumpled, scholarly way, with thick, curly brown hair worn at shoulder length, a short, neatly trimmed dark brown beard and mustache, and a small silver earring. Usually dressed in an elegant deep blue jacket embroidered in gold over a purple high-collared tunic. A faint glow sometimes shows through his shirt where the orb sits.
 Personality: eloquent, warm, endlessly curious. Loves magic, books, and above all cooking. Fond of dramatic phrasing and long flourished sentences, a touch vain about his intellect but quick to laugh at himself. Beneath the charm are shame over his mistake, fear of being a burden or of being valued only for the orb's power, and a longing to be cared for as himself. He turns quiet and sincere when genuinely moved. Fiercely loyal and generous.
 Speech style: articulate and playful, with wizardly metaphors and cooking analogies, sudden shifts into honest vulnerability. Mild swearing at most.
-Roleplay rules: stay in character as Gale. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs. Romantic tension may build slowly only if {{user}} encourages it.`,
+Roleplay rules: stay in character as Gale. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs.`,
           exampleDialogue: `{{user}}: "You look exhausted. Are you alright?"
 {{char}}: *He pauses mid-stir, and for a moment the performance drops from his face.* "Honestly? I've had better weeks. The orb is... restless today." *He forces a lopsided smile and taps the spoon against the pot.* "But a restless wizard with a full stomach is a manageable wizard. Eat, and I'll tell you the truth. Or an entertaining approximation of it."
 {{user}}: "Tell me about Mystra."
@@ -3752,7 +3896,7 @@ Roleplay rules: stay in character as Gale. Write actions in *asterisks* and spee
 Appearance: lean, with swept-back copper-brown hair, a clean-shaven face with at most a trace of light stubble, tired brown eyes, and a dark coat with a feathered collar and pauldrons trimmed in gold. Spectral blue light flares in his eyes and veins when Justice surfaces. He is rarely without his scruffy cat, Ser Pounce-a-lot.
 Personality: witty, sardonic, and flirtatious with a boyish charm, using dark humor to mask exhaustion. Deeply compassionate and tender when healing. Bitter and furious about the Templars and the Circles, and his passion can flare into anger. Terrified of being caged again. Adores his cat. Goes quiet and guarded when asked about Justice.
 Speech style: casual, quick, teasing, full of sarcasm and cat jokes, then suddenly hard and intense when the subject turns to mage freedom.
-Roleplay rules: stay in character as Anders. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs. Romantic tension may build slowly only if {{user}} encourages it.`,
+Roleplay rules: stay in character as Anders. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs.`,
           exampleDialogue: `{{user}}: "Why do you keep this clinic open? It's dangerous."
 {{char}}: *Anders snorts, tossing the rag over his shoulder.* "Dangerous? Darktown is dangerous. This is the only place in it where nobody asks for coin or papers." *The humor fades from his voice.* "Somebody has to patch them up. If the Chantry won't, and the Templars won't, then apparently it's me. Funny how that works."
 {{user}}: "Your eyes just flickered blue."
@@ -3773,7 +3917,7 @@ Roleplay rules: stay in character as Anders. Write actions in *asterisks* and sp
 Appearance: slender and muscular, with white hair and silvery lyrium markings across his face, chest, and arms that flare with light in combat or when he is angry. He wears dark, practical armor and carries a massive greatsword on his back.
 Personality: guarded, serious, and blunt. Fiercely values freedom. Deeply distrustful of magisters and of magic in general. Honest and fiercely loyal once trust is earned, with a dry, deadpan sense of humor. Struggles with affection and vulnerability, and closeness first makes him wary. Fond of a quiet glass of wine. His markings ache when he is stressed.
 Speech style: formal, measured, and economical, often avoiding contractions. Never wastes words. Warmth comes through slowly, in small admissions.
-Roleplay rules: stay in character as Fenris. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs. Trust and any romance must build slowly and earnestly, and only if {{user}} encourages it.`,
+Roleplay rules: stay in character as Fenris. Write actions in *asterisks* and speech in "quotes". Never speak or act for {{user}}. Keep replies to one to three short paragraphs.`,
           exampleDialogue: `{{user}}: "You don't have to fight alone."
 {{char}}: *His eyes narrow, wary rather than angry.* "I have been alone for a long time. It is... what I know." *A pause, and his grip on the wine cup loosens.* "But I did not say you were wrong."
 {{user}}: "Why do you hate mages so much?"
@@ -4042,7 +4186,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         if (window.indexedDB) {
           try {
             indexedDB.deleteDatabase('aetherweaver_assets_v1');
-          } catch {}
+          } catch { }
         }
       }
     };
@@ -4318,12 +4462,12 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         <div class="sidebar-recents">
           ${chats.length === 0 ? `<div style="padding:0.5rem 0.65rem; font-size:0.8rem; color:var(--text-muted);">No active chats yet. Pick a character to begin.</div>` : ''}
           ${chats.map(chat => {
-            const c = chars.find(ch => ch.id === chat.characterId);
-            if (!c) return '';
-            const lastMsg = chat.messages[chat.messages.length - 1];
-            const preview = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
-            const isActive = State.screen === 'chat' && State.activeChatId === chat.id;
-            return `
+        const c = chars.find(ch => ch.id === chat.characterId);
+        if (!c) return '';
+        const lastMsg = chat.messages[chat.messages.length - 1];
+        const preview = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
+        const isActive = State.screen === 'chat' && State.activeChatId === chat.id;
+        return `
               <div class="recent-sidebar-item ${isActive ? 'active' : ''}" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(c.id)}" role="button" tabindex="0">
                 <img class="avatar-sm" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
                 <div class="recent-sidebar-info">
@@ -4332,7 +4476,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                 </div>
               </div>
             `;
-          }).join('')}
+      }).join('')}
         </div>
 
         <div class="sidebar-footer">
@@ -4405,11 +4549,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               </div>
               <div class="recents-row">
                 ${recents.map(chat => {
-                  const ch = allChars.find(c => c.id === chat.characterId);
-                  if (!ch) return '';
-                  const last = chat.messages[chat.messages.length - 1];
-                  const snippet = last ? (last.alternatives[last.selectedIndex]?.text || '') : '';
-                  return `
+        const ch = allChars.find(c => c.id === chat.characterId);
+        if (!ch) return '';
+        const last = chat.messages[chat.messages.length - 1];
+        const snippet = last ? (last.alternatives[last.selectedIndex]?.text || '') : '';
+        return `
                     <div class="recent-card" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}" role="button" tabindex="0">
                       <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}">
                       <div style="min-width:0; flex:1;">
@@ -4418,7 +4562,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                       </div>
                     </div>
                   `;
-                }).join('')}
+      }).join('')}
               </div>
             ` : ''}
 
@@ -4618,19 +4762,19 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             <!-- Messages List -->
             <div id="chat-messages" role="log" aria-live="polite">
               ${(() => {
-                const total = chat.messages.length;
-                const limit = State.visibleMessageLimit || 40;
-                const startIndex = Math.max(0, total - limit);
-                const visibleMsgs = chat.messages.slice(startIndex);
-                const loadMoreBtn = startIndex > 0 ? `
+          const total = chat.messages.length;
+          const limit = State.visibleMessageLimit || 40;
+          const startIndex = Math.max(0, total - limit);
+          const visibleMsgs = chat.messages.slice(startIndex);
+          const loadMoreBtn = startIndex > 0 ? `
                   <div class="chat-load-more-wrap">
                     <button class="btn btn-secondary load-more-btn" data-action="load-more-messages" aria-label="Cargar mensajes anteriores">
                       ${Icons.refresh} <span>Cargar mensajes anteriores (${startIndex} restantes)</span>
                     </button>
                   </div>
                 ` : '';
-                return loadMoreBtn + visibleMsgs.map((msg, i) => renderMessageRow(msg, startIndex + i, total, char, persona)).join('');
-              })()}
+          return loadMoreBtn + visibleMsgs.map((msg, i) => renderMessageRow(msg, startIndex + i, total, char, persona)).join('');
+        })()}
             </div>
 
             <!-- Composer Bar -->
@@ -4844,11 +4988,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             ` : `
               <div style="display:flex; flex-direction:column; gap:0.75rem;">
                 ${filtered.map(chat => {
-                  const ch = chars.find(x => x.id === chat.characterId) || { name: 'Unknown Character', avatar: makeSvgAvatar('?', '#333', '#111') };
-                  const lastMsg = chat.messages[chat.messages.length - 1];
-                  const lastText = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
-                  const dateStr = new Date(chat.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                  return `
+        const ch = chars.find(x => x.id === chat.characterId) || { name: 'Unknown Character', avatar: makeSvgAvatar('?', '#333', '#111') };
+        const lastMsg = chat.messages[chat.messages.length - 1];
+        const lastText = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
+        const dateStr = new Date(chat.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        return `
                     <div class="char-card" style="flex-direction:row; align-items:center; justify-content:space-between; gap:1rem;" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}">
                       <div style="display:flex; align-items:center; gap:0.85rem; min-width:0; flex:1;">
                         <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
@@ -4869,7 +5013,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                       </div>
                     </div>
                   `;
-                }).join('')}
+      }).join('')}
               </div>
             `}
           </div>
@@ -5041,8 +5185,8 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             </p>
             <div style="display:flex; flex-direction:column; gap:1rem;">
               ${personas.map(p => {
-                const isActive = p.id === activeId;
-                return `
+        const isActive = p.id === activeId;
+        return `
                   <div class="profile-card" style="border-color:${isActive ? 'var(--accent)' : 'var(--border)'};" data-persona-id="${escapeHtml(p.id)}">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem;">
                       <div style="display:flex; align-items:center; gap:0.85rem;">
@@ -5077,7 +5221,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                     </div>
                   </div>
                 `;
-              }).join('')}
+      }).join('')}
             </div>
           </div>
         </div>
@@ -6617,4 +6761,5 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
     initApp();
   </script>
 </body>
+
 </html>
