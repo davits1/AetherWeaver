@@ -1237,6 +1237,33 @@
       color: var(--text-secondary);
     }
 
+    .msg-mood-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-family: var(--font-sans);
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: lowercase;
+      color: var(--text-muted);
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      padding: 0.08rem 0.45rem;
+      border-radius: var(--radius-sm);
+      -webkit-user-select: none;
+      user-select: none;
+      animation: fadeIn 0.2s ease-in-out;
+    }
+
+    .msg-mood-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
     /* Manuscript / Novel Typeset Message Box */
     .msg-bubble {
       padding: var(--msg-pad);
@@ -2100,6 +2127,13 @@
         return str ? Math.ceil(str.length / this.CHARS_PER_TOKEN) : 0;
       },
 
+      matchKeyword(text, keyword) {
+        if (!text || !keyword) return false;
+        const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rx = new RegExp(`(?:^|\\b)${escaped}(?:\\b|$)`, 'i');
+        return rx.test(text);
+      },
+
       fillNames(str, charName, userName) {
         return String(str || '')
           .replace(/\{\{char\}\}/gi, charName)
@@ -2158,15 +2192,14 @@
           .filter(h => h.text && h.text !== this.STOPPED_PLACEHOLDER);
         const historyLines = history.map(h => `${h.speaker}: ${h.text}`);
 
-        // Lorebook: enabled entries whose keyword appears (case-insensitive) in recent text
+        // Lorebook: enabled entries whose keyword appears (case-insensitive word boundary) in recent text
         const scanText = (history.slice(-this.LORE_SCAN_MESSAGES).map(h => h.text).join('\n') + '\n' + (continueFrom || ''))
-          .slice(-this.LORE_SCAN_CHARS)
-          .toLowerCase();
+          .slice(-this.LORE_SCAN_CHARS);
         const triggeredLore = (lorebookEntries || []).filter(e =>
           e && e.enabled && String(e.text || '').trim() &&
           (e.keywords || []).some(k => {
-            const key = fill(k).toLowerCase();
-            return key && scanText.includes(key);
+            const key = fill(k);
+            return key && this.matchKeyword(scanText, key);
           })
         );
         let loreTexts = triggeredLore.map(e => fill(e.text));
@@ -2217,7 +2250,7 @@
 
         // Stop sequences: built-ins + user configured, with names filled and literal \n converted
         const stops = [];
-        [`\n${userName}:`, '\nUSER:', '\nUser:', ...((adv.stopSequences || []).map(s => this.fillNames(this.normalizeStop(s), charName, userName)))]
+        [`\n${userName}:`, `\n${charName}:`, '\nUSER:', '\nUser:', ...((adv.stopSequences || []).map(s => this.fillNames(this.normalizeStop(s), charName, userName)))]
           .forEach(s => { if (s && !stops.includes(s)) stops.push(s); });
 
         const payload = {
@@ -2252,6 +2285,7 @@
             historyKept: kept.length - (anLine ? 1 : 0),
             historyTotal: historyLines.length,
             loreTriggered: triggeredLore.map(e => e.name),
+            loreTriggeredIds: triggeredLore.map(e => e.id),
             dropped
           }
         };
@@ -2287,7 +2321,7 @@
         return err;
       },
 
-      async generate({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, signal, onToken, continueFrom = '' }) {
+      async generate({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, signal, onToken, continueFrom = '', _forceNoStream = false }) {
         if (signal && signal.aborted) throw new DOMException('Generation aborted', 'AbortError');
 
         const req = this.buildRequest({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, continueFrom });
@@ -2304,7 +2338,7 @@
         if (override && !/^https?:\/\//i.test(override)) {
           headers.Authorization = 'Bearer ' + override.replace(/^Bearer\s+/i, '');
         } else if (isDirect) {
-          throw new Error('NovelAI API token is required. Por favor ve a Ajustes (icono de engranaje) y escribe tu API Token de NovelAI.');
+          throw new Error('NovelAI API token is required. Please go to Settings (gear icon) and enter your NovelAI API token.');
         }
 
         let debug = false;
@@ -2365,7 +2399,7 @@
           } catch (err) {
             if (signal && signal.aborted) throw abortError();
             if (isDirect) {
-              throw new Error(`No se pudo conectar directamente con NovelAI (${err.message}). Revisa tu conexión a internet o verifica tu API Token en Ajustes.`);
+              throw new Error(`Could not connect directly to NovelAI (${err.message}). Check your internet connection or verify your API token in Settings.`);
             }
             throw new Error(`Could not reach the proxy at "${rawProxy || '/proxy'}". Is "node proxy.mjs" running, and is the app opened from the proxy's address? (${err.message})`);
           }
@@ -2384,7 +2418,7 @@
 
           let res = null;
           let streamed = false;
-          if (!this.streamUnsupported) {
+          if (!this.streamUnsupported && !_forceNoStream) {
             res = await post(true);
             if (!res.ok) {
               if ([400, 404, 405, 415, 422, 501].includes(res.status)) {
@@ -2550,6 +2584,31 @@
           }
         }
         return 'idb:' + key;
+      },
+
+      async delete(key) {
+        if (!key) return;
+        if (typeof key === 'string' && key.startsWith('idb:')) key = key.slice(4);
+        if (this._cache.has(key)) {
+          const url = this._cache.get(key);
+          if (typeof url === 'string' && url.startsWith('blob:')) {
+            try { URL.revokeObjectURL(url); } catch (e) { }
+          }
+          this._cache.delete(key);
+        }
+        await this.init();
+        if (this._db) {
+          try {
+            await new Promise((resolve, reject) => {
+              const tx = this._db.transaction('images', 'readwrite');
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+              tx.objectStore('images').delete(key);
+            });
+          } catch (e) {
+            console.warn('[ImageStore] Failed to delete image from IndexedDB:', e);
+          }
+        }
       },
 
       async get(key) {
@@ -2764,7 +2823,7 @@
         if (tokenOverride && !/^https?:\/\//i.test(tokenOverride)) {
           headers['Authorization'] = `Bearer ${tokenOverride.replace(/^Bearer\s+/i, '')}`;
         } else if (isDirect) {
-          throw new Error('NovelAI API token is required for Visual Director. Por favor escribe tu API Token en Ajustes.');
+          throw new Error('NovelAI API token is required for Visual Director. Please enter your API token in Settings.');
         }
 
         const cleanScene = (sceneText || '').replace(/[*_#]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
@@ -3205,12 +3264,12 @@
 
         const headers = {
           'Content-Type': 'application/json',
-          'Accept': isDirect ? 'application/x-zip-compressed, application/json, */*' : 'application/json'
+          'Accept': 'application/x-zip-compressed, application/json, */*'
         };
         if (tokenOverride) {
           headers['Authorization'] = `Bearer ${tokenOverride.replace(/^Bearer\s+/i, '')}`;
         } else if (isDirect) {
-          throw new Error('NovelAI API token is required for image generation. Por favor escribe tu API Token en Ajustes.');
+          throw new Error('NovelAI API token is required for image generation. Please enter your API token in Settings.');
         }
 
         const targetUrl = isDirect
@@ -3246,20 +3305,23 @@
           throw new Error(errMsg);
         }
 
-        if (isDirect) {
-          const buf = await res.arrayBuffer();
-          const pngBytes = await this.extractPngBytes(buf);
-          const blob = new Blob([pngBytes], { type: 'image/png' });
-          const key = (isAvatar ? 'avatar_' : 'scene_') + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-          await ImageStore.save(key, blob);
-          return 'idb:' + key;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          try {
+            const clone = res.clone();
+            const data = await clone.json();
+            if (data && data.url) {
+              return data.url;
+            }
+          } catch (e) { }
         }
 
-        const data = await res.json();
-        if (!data || !data.url) {
-          throw new Error('NovelAI proxy did not return an image URL.');
-        }
-        return data.url;
+        const buf = await res.arrayBuffer();
+        const pngBytes = await this.extractPngBytes(buf);
+        const blob = new Blob([pngBytes], { type: 'image/png' });
+        const key = (isAvatar ? 'avatar_' : 'scene_') + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        await ImageStore.save(key, blob);
+        return 'idb:' + key;
       }
     };
     /* NAI-IMAGE:END */
@@ -4195,7 +4257,6 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         if (Array.isArray(payload.personas)) this.savePersonas(payload.personas);
         if (payload.activePersonaId) this.setActivePersonaId(payload.activePersonaId);
         if (payload.settings) this.saveSettings(payload.settings);
-        await ImageStore.preloadAll(this.getChats(), this.getCharacters(), this.getPersonas());
       },
 
       async resetToDemo() {
@@ -4274,17 +4335,22 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             ]
           }
         ],
-        memory: `Character: ${character.name} (${character.tagline})`,
+        memory: `Character: ${character.name} (${character.tagline || ''})`,
         authorsNote: 'Maintain character voice, grounded sensory detail, and roleplay formatting with *actions* and "dialogue".',
-        lorebook: [
-          {
-            id: 'lore_seed_1',
-            name: `${character.name}'s Background`,
-            keywords: [character.name.split(' ')[0].toLowerCase(), 'past', 'secret'],
-            text: character.description.slice(0, 260),
-            enabled: true
-          }
-        ],
+        lorebook: (Array.isArray(character.lorebook) && character.lorebook.length > 0)
+          ? character.lorebook.map(entry => ({
+              ...JSON.parse(JSON.stringify(entry)),
+              id: 'lore_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)
+            }))
+          : [
+              {
+                id: 'lore_seed_1',
+                name: `${character.name}'s Background`,
+                keywords: [character.name.split(' ')[0].toLowerCase(), 'past', 'secret'],
+                text: (character.description || '').slice(0, 260),
+                enabled: true
+              }
+            ],
         updatedAt: Date.now()
       };
       updateChatInStorage(chat);
@@ -4322,7 +4388,8 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
       download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
       upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
-      sparkles: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z"/></svg>`
+      sparkles: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z"/></svg>`,
+      branch: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>`
     };
 
     function escapeHtml(str) {
@@ -4336,32 +4403,429 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
     }
 
     /**
-     * Roleplay & Basic Markdown Formatter:
-     * - Code blocks ```...``` and inline `...`
-     * - **bold**
-     * - *italic action text* -> <em class="rp-action">
-     * - "quoted speech" -> <span class="rp-quote">
+     * Safely decodes a Base64 string containing UTF-8 characters.
+     */
+    function decodeBase64Utf8(b64) {
+      const bin = atob(b64.trim());
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+
+    /**
+     * Safely encodes a UTF-8 string into a Base64 string.
+     */
+    function encodeBase64Utf8(str) {
+      const bytes = new TextEncoder().encode(str);
+      let binary = '';
+      const chunkSize = 32768;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, bytes.length)));
+      }
+      return btoa(binary);
+    }
+
+    /**
+     * Extracts Character Card (SillyTavern V2 or V1) JSON from PNG arrayBuffer.
+     * Looks for a tEXt chunk with keyword "chara".
+     */
+    function extractCharaFromPng(buffer) {
+      const bytes = new Uint8Array(buffer);
+      if (bytes.length < 8 || bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) {
+        throw new Error('File is not a valid PNG image.');
+      }
+      const view = new DataView(buffer);
+      let pos = 8;
+      while (pos < bytes.length - 8) {
+        const length = view.getUint32(pos);
+        const type = String.fromCharCode(bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]);
+        if (type === 'tEXt') {
+          const dataStart = pos + 8;
+          const dataEnd = dataStart + length;
+          let nullPos = dataStart;
+          while (nullPos < dataEnd && bytes[nullPos] !== 0) {
+            nullPos++;
+          }
+          const keyword = new TextDecoder('latin1').decode(bytes.subarray(dataStart, nullPos));
+          if (keyword.toLowerCase() === 'chara') {
+            const textBytes = bytes.subarray(nullPos + 1, dataEnd);
+            const b64 = new TextDecoder('latin1').decode(textBytes);
+            const jsonStr = decodeBase64Utf8(b64);
+            return JSON.parse(jsonStr);
+          }
+        }
+        pos += 12 + length; // 4 len + 4 type + length + 4 crc
+      }
+      return null;
+    }
+
+    /**
+     * Parses NovelAI .lorebook JSON and converts into AetherWeaver LorebookEntry[].
+     */
+    function parseLorebookJson(rawJson) {
+      const entries = Array.isArray(rawJson.entries)
+        ? rawJson.entries
+        : (rawJson.entries && typeof rawJson.entries === 'object' ? Object.values(rawJson.entries) : []);
+      if (!entries.length && Array.isArray(rawJson)) {
+        entries.push(...rawJson);
+      }
+      return entries.map(e => {
+        let keys = [];
+        if (Array.isArray(e.keys)) keys = e.keys;
+        else if (Array.isArray(e.key)) keys = e.key;
+        else if (typeof e.keys === 'string') keys = e.keys.split(',').map(k => k.trim());
+        else if (typeof e.key === 'string') keys = e.key.split(',').map(k => k.trim());
+        return {
+          id: 'lore_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+          name: e.displayName || e.title || e.comment || e.name || (keys[0] || 'Lore Entry'),
+          keywords: keys.filter(Boolean),
+          text: e.text || e.content || '',
+          enabled: e.enabled !== false
+        };
+      }).filter(e => e.text || e.name);
+    }
+
+    /**
+     * Imports a SillyTavern character card or generic character JSON into AetherWeaver storage.
+     */
+    async function importCharacterCardData(rawCard, imageBlobOrBytes = null) {
+      const d = rawCard.data || rawCard;
+      if (!d.name) {
+        throw new Error('Character card JSON is missing a name field.');
+      }
+      let avatarUri = '';
+      if (imageBlobOrBytes) {
+        const key = 'avatar_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        const blob = imageBlobOrBytes instanceof Blob
+          ? imageBlobOrBytes
+          : new Blob([imageBlobOrBytes], { type: 'image/png' });
+        await ImageStore.save(key, blob);
+        avatarUri = 'idb:' + key;
+      }
+
+      const lorebook = [];
+      if (d.character_book?.entries && Array.isArray(d.character_book.entries)) {
+        d.character_book.entries.forEach(e => {
+          let keys = [];
+          if (Array.isArray(e.keys)) keys = e.keys;
+          else if (typeof e.keys === 'string') keys = e.keys.split(',').map(k => k.trim());
+          lorebook.push({
+            id: 'lore_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            name: e.comment || e.name || (keys[0] || 'Lore Entry'),
+            keywords: keys.filter(Boolean),
+            text: e.content || e.text || '',
+            enabled: e.enabled !== false
+          });
+        });
+      }
+
+      const descParts = [];
+      if (d.description) descParts.push(d.description);
+      if (d.personality) descParts.push(`[Personality: ${d.personality}]`);
+      if (d.scenario) descParts.push(`[Scenario: ${d.scenario}]`);
+
+      const character = {
+        id: '',
+        name: d.name.trim(),
+        tagline: (d.creator_notes || d.tagline || (d.description ? d.description.slice(0, 90) + '...' : '')).trim() || 'Imported Character',
+        creator: d.creator ? `@${d.creator.replace(/^@/, '')}` : '@imported',
+        chatCount: 0,
+        visibility: 'public',
+        tags: Array.isArray(d.tags) ? d.tags : (typeof d.tags === 'string' ? d.tags.split(',').map(t => t.trim()) : ['Imported']),
+        avatar: avatarUri,
+        greeting: d.first_mes || d.greeting || '',
+        description: descParts.join('\n\n'),
+        exampleDialogue: d.mes_example || d.exampleDialogue || '',
+        lorebook: lorebook.length ? lorebook : (Array.isArray(d.lorebook) ? d.lorebook : []),
+        updatedAt: Date.now()
+      };
+
+      const saved = await API.saveCharacter(character);
+      return saved;
+    }
+
+    const CRC_TABLE = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      CRC_TABLE[n] = c >>> 0;
+    }
+
+    function calculatePngCrc32(bytes) {
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) {
+        crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[i]) & 0xFF];
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function createPngWithCharaChunk(origBytes, charaPayload) {
+      if (origBytes.length < 8 || origBytes[0] !== 0x89 || origBytes[1] !== 0x50 || origBytes[2] !== 0x4E || origBytes[3] !== 0x47) {
+        throw new Error('Base file is not a valid PNG image.');
+      }
+      const view = new DataView(origBytes.buffer, origBytes.byteOffset, origBytes.byteLength);
+      const ihdrLen = view.getUint32(8);
+      const ihdrEnd = 8 + 12 + ihdrLen;
+
+      const keyword = 'chara';
+      const b64 = encodeBase64Utf8(JSON.stringify(charaPayload));
+      const keywordBytes = new TextEncoder().encode(keyword);
+      const textBytes = new TextEncoder().encode(b64);
+      const dataLen = keywordBytes.length + 1 + textBytes.length;
+
+      // 4 len + 4 type ('tEXt') + dataLen + 4 crc
+      const chunk = new Uint8Array(12 + dataLen);
+      const chunkView = new DataView(chunk.buffer);
+      chunkView.setUint32(0, dataLen);
+      chunk[4] = 116; chunk[5] = 69; chunk[6] = 88; chunk[7] = 116; // 'tEXt'
+      chunk.set(keywordBytes, 8);
+      chunk[8 + keywordBytes.length] = 0; // null separator
+      chunk.set(textBytes, 8 + keywordBytes.length + 1);
+
+      // CRC is computed over type (bytes 4..8) and data (bytes 8..8+dataLen)
+      const crcVal = calculatePngCrc32(chunk.subarray(4, 8 + dataLen));
+      chunkView.setUint32(8 + dataLen, crcVal);
+
+      // Assemble new PNG
+      const result = new Uint8Array(origBytes.length + chunk.length);
+      result.set(origBytes.subarray(0, ihdrEnd), 0);
+      result.set(chunk, ihdrEnd);
+      result.set(origBytes.subarray(ihdrEnd), ihdrEnd + chunk.length);
+      return result;
+    }
+
+    async function exportCharacterCardPng(char) {
+      try {
+        showToast('Preparing Character Card PNG...', 'info');
+        const cardPayload = {
+          spec: 'chara_card_v2',
+          spec_version: '2.0',
+          data: {
+            name: char.name,
+            description: char.description || '',
+            personality: '',
+            scenario: '',
+            first_mes: char.greeting || '',
+            mes_example: char.exampleDialogue || '',
+            creator_notes: char.tagline || '',
+            system_prompt: '',
+            post_history_instructions: '',
+            tags: char.tags || [],
+            creator: char.creator || '',
+            character_version: '1.0',
+            alternate_greetings: [],
+            extensions: {},
+            character_book: {
+              entries: (char.lorebook || []).map((e, idx) => ({
+                id: idx,
+                keys: e.keywords || [],
+                content: e.text || '',
+                comment: e.name || '',
+                enabled: e.enabled !== false
+              }))
+            }
+          }
+        };
+
+        // Render avatar into canvas to guarantee clean PNG bytes
+        const canvas = document.createElement('canvas');
+        canvas.width = 400;
+        canvas.height = 400;
+        const ctx = canvas.getContext('2d');
+
+        let drawn = false;
+        if (char.avatar) {
+          try {
+            const avatarUrl = ImageStore.resolveUrl(char.avatar);
+            if (avatarUrl) {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              await new Promise((res) => {
+                img.onload = () => {
+                  try {
+                    ctx.drawImage(img, 0, 0, 400, 400);
+                    drawn = true;
+                  } catch (e) { }
+                  res();
+                };
+                img.onerror = () => res();
+                img.src = avatarUrl;
+              });
+            }
+          } catch (e) {
+            console.warn('Could not render existing avatar to canvas:', e);
+          }
+        }
+
+        if (!drawn) {
+          ctx.fillStyle = '#221E1A';
+          ctx.fillRect(0, 0, 400, 400);
+          ctx.fillStyle = '#D98A4E';
+          ctx.font = 'bold 84px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText((char.name || 'AW').slice(0, 2).toUpperCase(), 200, 200);
+        }
+
+        const pngBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+        const pngBuf = await pngBlob.arrayBuffer();
+        const cardPngBytes = createPngWithCharaChunk(new Uint8Array(pngBuf), cardPayload);
+
+        const outBlob = new Blob([cardPngBytes], { type: 'image/png' });
+        const url = URL.createObjectURL(outBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        const safeName = (char.name || 'character').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        a.download = `${safeName}_card.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        showToast(`Exported "${char.name}" card PNG.`, 'success');
+      } catch (err) {
+        console.error('Failed to export character card PNG:', err);
+        showToast('Export failed: ' + err.message, 'error');
+      }
+    }
+
+    function promptLorebookImport(callback) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.lorebook,.json,application/json';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          const json = JSON.parse(text);
+          const entries = parseLorebookJson(json);
+          if (!entries.length) {
+            showToast('No entries found in lorebook file.', 'warning');
+            return;
+          }
+          callback(entries);
+        } catch (err) {
+          console.error('Failed to parse lorebook file:', err);
+          showToast('Invalid lorebook JSON: ' + err.message, 'error');
+        }
+      };
+      input.click();
+    }
+
+    function promptCharacterFileImport() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.png,.json,image/png,application/json';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          if (file.name.toLowerCase().endsWith('.png') || file.type === 'image/png') {
+            const buf = await file.arrayBuffer();
+            const card = extractCharaFromPng(buf);
+            if (!card) {
+              showToast('No SillyTavern character card data found in this PNG.', 'warning');
+              return;
+            }
+            const saved = await importCharacterCardData(card, new Blob([buf], { type: 'image/png' }));
+            showToast(`Imported character card "${saved.name}".`, 'success');
+            State.editorCharacterId = saved.id;
+            State.screen = 'editor';
+            renderMainView();
+          } else {
+            const text = await file.text();
+            const json = JSON.parse(text);
+            const saved = await importCharacterCardData(json);
+            showToast(`Imported character "${saved.name}".`, 'success');
+            State.editorCharacterId = saved.id;
+            State.screen = 'editor';
+            renderMainView();
+          }
+        } catch (err) {
+          console.error('Failed to import character file:', err);
+          showToast('Import failed: ' + (err.message || 'Unknown error'), 'error');
+        }
+      };
+      input.click();
+    }
+
+    /**
+     * Roleplay & Markdown Formatter (Regex collision-free):
+     * 1. Protects code blocks and inline code via temporary placeholders
+     * 2. Formats bold, actions, and quotes across HTML entities
+     * 3. Restores code placeholders
      */
     function formatRoleplayText(raw) {
       if (!raw) return '';
       let safe = escapeHtml(raw);
 
-      // Fenced code blocks
-      safe = safe.replace(/```([\s\S]*?)```/g, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
-      // Inline code
-      safe = safe.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-      // Bold **text**
-      safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      // Roleplay *action* (between single asterisks)
-      safe = safe.replace(/\*([^*\n]+)\*/g, '<em class="rp-action">*$1*</em>');
-      // Roleplay "dialogue"
-      safe = safe.replace(/&quot;([^&]+?)&quot;/g, '<span class="rp-quote">&quot;$1&quot;</span>');
+      // 1. Extract fenced code blocks and inline code into placeholders
+      const codeBlocks = [];
+      safe = safe.replace(/```([\s\S]*?)```/g, (_, code) => {
+        const id = `\x00CODE_${codeBlocks.length}\x00`;
+        codeBlocks.push(`<pre><code>${code.trim()}</code></pre>`);
+        return id;
+      });
+      safe = safe.replace(/`([^`\n]+)`/g, (_, code) => {
+        const id = `\x00CODE_${codeBlocks.length}\x00`;
+        codeBlocks.push(`<code>${code}</code>`);
+        return id;
+      });
 
-      // Paragraphs
+      // 2. Bold **text**
+      safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+      // 3. Roleplay *action* (between single asterisks)
+      safe = safe.replace(/\*([^*\n]+)\*/g, '<em class="rp-action">*$1*</em>');
+
+      // 4. Roleplay "dialogue" safely across HTML entities and inner italics
+      safe = safe.replace(/&quot;((?:(?!&quot;)[\s\S])+?)&quot;/g, '<span class="rp-quote">&quot;$1&quot;</span>');
+
+      // 5. Restore code placeholders
+      codeBlocks.forEach((block, idx) => {
+        safe = safe.replace(`\x00CODE_${idx}\x00`, () => block);
+      });
+
+      // 6. Paragraphs
       return safe
         .split(/\n{2,}/)
         .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
         .join('');
+    }
+
+    /**
+     * Formats roleplay text while streaming is active:
+     * Auto-closes any trailing unclosed * or " on a copy to prevent formatting flicker.
+     */
+    function formatStreamingText(text) {
+      if (!text) return '';
+      let copy = text;
+      const asterisks = copy.match(/(?<!\\)\*/g);
+      if (asterisks && asterisks.length % 2 === 1) {
+        copy += '*';
+      }
+      const quotes = copy.match(/(?<!\\)"/g);
+      if (quotes && quotes.length % 2 === 1) {
+        copy += '"';
+      }
+      return formatRoleplayText(copy);
+    }
+
+    /**
+     * Extracts Xialong / character emotion tags (e.g. "Emotion: tired")
+     * from message text for visual UI presentation, while keeping it in the underlying storage/prompt.
+     */
+    function extractMessageEmotion(raw) {
+      if (!raw || typeof raw !== 'string') return { cleanText: '', emotion: null };
+      const emotionRegex = /(?:\r?\n|^)\s*Emotion:\s*([a-zA-Z_\-]+)\s*(?=\r?\n|$)/gi;
+      let match;
+      let lastEmotion = null;
+      while ((match = emotionRegex.exec(raw)) !== null) {
+        lastEmotion = match[1].toLowerCase();
+      }
+      // Remove raw "Emotion: <tag>" lines for clean prose rendering
+      const cleanText = raw.replace(/(?:\r?\n|^)\s*Emotion:\s*[a-zA-Z_\-]+\s*(?=\r?\n|$)/gi, '').trimEnd();
+      return { cleanText, emotion: lastEmotion };
     }
 
     function formatCount(num) {
@@ -4528,10 +4992,85 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       `;
     }
 
-    async function renderDiscoverScreen(main) {
+    async function renderDiscoverResults() {
+      const container = document.getElementById('discover-results');
+      if (!container) return;
       const recents = Storage.getChats().sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6);
       const allChars = Storage.getCharacters();
       const filteredChars = await API.listCharacters(State.searchQuery, State.selectedCategory);
+
+      container.innerHTML = `
+        ${recents.length > 0 && !State.searchQuery && State.selectedCategory === 'All' ? `
+          <div class="section-header">
+            <h2 class="section-title">Continue Chatting</h2>
+            <button class="btn btn-ghost" data-action="nav" data-screen="history">View all</button>
+          </div>
+          <div class="recents-row">
+            ${recents.map(chat => {
+              const ch = allChars.find(c => c.id === chat.characterId);
+              if (!ch) return '';
+              const last = chat.messages[chat.messages.length - 1];
+              const snippet = last ? (last.alternatives[last.selectedIndex]?.text || '') : '';
+              return `
+                <div class="recent-card" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}" role="button" tabindex="0">
+                  <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}">
+                  <div style="min-width:0; flex:1;">
+                    <div style="font-weight:700; font-size:0.94rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(ch.name)}</div>
+                    <div style="font-size:0.78rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(snippet.replace(/[*"]/g, '').slice(0, 38))}</div>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        ` : ''}
+
+        <div class="section-header">
+          <h2 class="section-title">${State.selectedCategory === 'All' ? 'Featured Characters' : escapeHtml(State.selectedCategory)} (${filteredChars.length})</h2>
+        </div>
+
+        ${filteredChars.length === 0 ? `
+          <div style="text-align:center; padding:3rem 1rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:16px;">
+            <p style="font-size:1.05rem; font-weight:600; margin-bottom:0.5rem;">No matching characters found</p>
+            <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.25rem;">Try clearing your search filter or create your own original character.</p>
+            <button class="btn btn-primary" data-action="create-char">${Icons.plus} Create New Character</button>
+          </div>
+        ` : `
+          <div class="char-grid">
+            ${filteredChars.map(c => `
+              <article class="char-card" data-action="start-or-open-char" data-char-id="${escapeHtml(c.id)}" role="button" tabindex="0" aria-label="Chat with ${escapeHtml(c.name)}">
+                <div class="char-card-top">
+                  <img class="char-avatar-lg" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
+                  <div class="char-card-meta">
+                    <div class="char-card-name" style="display:flex; align-items:center; justify-content:space-between; gap:0.35rem;">
+                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(c.name)}</span>
+                      ${!isSeedCharacter(c.id) ? `<span class="badge" style="font-size:0.65rem; padding:0.1rem 0.35rem; font-weight:700; flex-shrink:0;">Custom</span>` : ''}
+                    </div>
+                    <div class="char-card-creator">by ${escapeHtml(c.creator || '@you')}</div>
+                    <div class="char-card-tagline">${escapeHtml(c.tagline)}</div>
+                  </div>
+                </div>
+                <div class="char-card-footer">
+                  <div class="tag-badges">
+                    ${(c.tags || []).slice(0, 3).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('')}
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.35rem;">
+                    <span>${formatCount(c.chatCount)} chats</span>
+                    <button class="icon-btn" style="width:34px;height:34px;" data-action="duplicate-char" data-char-id="${escapeHtml(c.id)}" aria-label="Clone ${escapeHtml(c.name)}" title="Clone Character">
+                      ${Icons.copy}
+                    </button>
+                    <button class="icon-btn" style="width:34px;height:34px;" data-action="view-profile" data-char-id="${escapeHtml(c.id)}" aria-label="View profile for ${escapeHtml(c.name)}" title="Character Profile">
+                      ${Icons.more}
+                    </button>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        `}
+      `;
+    }
+
+    async function renderDiscoverScreen(main) {
       const settings = Storage.getSettings();
 
       main.innerHTML = `
@@ -4539,6 +5078,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           <div class="top-bar-title">Discover Characters</div>
           <div style="display:flex; gap:0.35rem; align-items:center;">
             <button class="icon-btn" data-action="toggle-theme" aria-label="Toggle theme">${settings.theme === 'dark' ? Icons.sun : Icons.moon}</button>
+            <button class="btn btn-secondary" data-action="import-char-file">${Icons.upload} <span>Import</span></button>
             <button class="btn btn-primary" data-action="create-char">${Icons.plus} <span>Create</span></button>
           </div>
         </div>
@@ -4548,7 +5088,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               <div class="search-bar-wrap">
                 ${Icons.search}
                 <input type="search" id="discover-search-input" class="search-input" placeholder="Search characters, genres, or creators... (Press / to focus)" value="${escapeHtml(State.searchQuery)}" aria-label="Search characters">
-                ${State.searchQuery ? `<button class="icon-btn search-clear-btn" data-action="clear-search" aria-label="Clear search">${Icons.close}</button>` : ''}
+                <button class="icon-btn search-clear-btn ${State.searchQuery ? '' : 'hidden'}" data-action="clear-search" aria-label="Clear search">${Icons.close}</button>
               </div>
               <div class="chip-row" role="tablist" aria-label="Character categories">
                 ${CATEGORIES.map(cat => `
@@ -4559,87 +5099,20 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               </div>
             </div>
 
-            ${recents.length > 0 && !State.searchQuery && State.selectedCategory === 'All' ? `
-              <div class="section-header">
-                <h2 class="section-title">Continue Chatting</h2>
-                <button class="btn btn-ghost" data-action="nav" data-screen="history">View all</button>
-              </div>
-              <div class="recents-row">
-                ${recents.map(chat => {
-        const ch = allChars.find(c => c.id === chat.characterId);
-        if (!ch) return '';
-        const last = chat.messages[chat.messages.length - 1];
-        const snippet = last ? (last.alternatives[last.selectedIndex]?.text || '') : '';
-        return `
-                    <div class="recent-card" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}" role="button" tabindex="0">
-                      <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}">
-                      <div style="min-width:0; flex:1;">
-                        <div style="font-weight:700; font-size:0.94rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(ch.name)}</div>
-                        <div style="font-size:0.78rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(snippet.replace(/[*"]/g, '').slice(0, 38))}</div>
-                      </div>
-                    </div>
-                  `;
-      }).join('')}
-              </div>
-            ` : ''}
-
-            <div class="section-header">
-              <h2 class="section-title">${State.selectedCategory === 'All' ? 'Featured Characters' : escapeHtml(State.selectedCategory)} (${filteredChars.length})</h2>
-            </div>
-
-            ${filteredChars.length === 0 ? `
-              <div style="text-align:center; padding:3rem 1rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:16px;">
-                <p style="font-size:1.05rem; font-weight:600; margin-bottom:0.5rem;">No matching characters found</p>
-                <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.25rem;">Try clearing your search filter or create your own original character.</p>
-                <button class="btn btn-primary" data-action="create-char">${Icons.plus} Create New Character</button>
-              </div>
-            ` : `
-              <div class="char-grid">
-                ${filteredChars.map(c => `
-                  <article class="char-card" data-action="start-or-open-char" data-char-id="${escapeHtml(c.id)}" role="button" tabindex="0" aria-label="Chat with ${escapeHtml(c.name)}">
-                    <div class="char-card-top">
-                      <img class="char-avatar-lg" src="${ImageStore.resolveUrl(c.avatar)}" ${c.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(c.avatar.slice(4))}"` : ''} alt="${escapeHtml(c.name)}">
-                      <div class="char-card-meta">
-                        <div class="char-card-name" style="display:flex; align-items:center; justify-content:space-between; gap:0.35rem;">
-                          <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(c.name)}</span>
-                          ${!isSeedCharacter(c.id) ? `<span class="badge" style="font-size:0.65rem; padding:0.1rem 0.35rem; font-weight:700; flex-shrink:0;">Custom</span>` : ''}
-                        </div>
-                        <div class="char-card-creator">by ${escapeHtml(c.creator || '@you')}</div>
-                        <div class="char-card-tagline">${escapeHtml(c.tagline)}</div>
-                      </div>
-                    </div>
-                    <div class="char-card-footer">
-                      <div class="tag-badges">
-                        ${(c.tags || []).slice(0, 3).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('')}
-                      </div>
-                      <div style="display:flex; align-items:center; gap:0.35rem;">
-                        <span>${formatCount(c.chatCount)} chats</span>
-                        <button class="icon-btn" style="width:34px;height:34px;" data-action="duplicate-char" data-char-id="${escapeHtml(c.id)}" aria-label="Clone ${escapeHtml(c.name)}" title="Clone Character">
-                          ${Icons.copy}
-                        </button>
-                        <button class="icon-btn" style="width:34px;height:34px;" data-action="view-profile" data-char-id="${escapeHtml(c.id)}" aria-label="View profile for ${escapeHtml(c.name)}" title="Character Profile">
-                          ${Icons.more}
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                `).join('')}
-              </div>
-            `}
+            <div id="discover-results"></div>
           </div>
         </div>
       `;
+
+      await renderDiscoverResults();
 
       const searchInput = document.getElementById('discover-search-input');
       if (searchInput) {
         searchInput.addEventListener('input', (e) => {
           State.searchQuery = e.target.value;
-          renderMainView();
-          const el = document.getElementById('discover-search-input');
-          if (el) {
-            el.focus();
-            el.setSelectionRange(el.value.length, el.value.length);
-          }
+          const clearBtn = document.querySelector('.search-clear-btn');
+          if (clearBtn) clearBtn.classList.toggle('hidden', !State.searchQuery);
+          renderDiscoverResults();
         });
       }
     }
@@ -4739,6 +5212,22 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       const persona = getActivePersona();
       const settings = Storage.getSettings();
 
+      let promptStats = null;
+      try {
+        const req = NovelAIText.buildRequest({
+          character: char,
+          persona,
+          messages: chat.messages || [],
+          memory: chat.memory || '',
+          authorsNote: chat.authorsNote || '',
+          lorebookEntries: chat.lorebook || [],
+          settings
+        });
+        promptStats = req.stats;
+      } catch (e) {
+        console.warn('Could not calculate prompt stats:', e);
+      }
+
       main.innerHTML = `
         <div class="chat-layout">
           <div class="chat-main-col">
@@ -4785,8 +5274,8 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           const visibleMsgs = chat.messages.slice(startIndex);
           const loadMoreBtn = startIndex > 0 ? `
                   <div class="chat-load-more-wrap">
-                    <button class="btn btn-secondary load-more-btn" data-action="load-more-messages" aria-label="Cargar mensajes anteriores">
-                      ${Icons.refresh} <span>Cargar mensajes anteriores (${startIndex} restantes)</span>
+                    <button class="btn btn-secondary load-more-btn" data-action="load-more-messages" aria-label="Load previous messages">
+                      ${Icons.refresh} <span>Load previous messages (${startIndex} remaining)</span>
                     </button>
                   </div>
                 ` : '';
@@ -4812,7 +5301,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   <button class="icon-btn" data-action="refresh-suggestions" title="Suggest Replies" aria-label="Suggest replies">
                     ${Icons.sparkles}
                   </button>
-                  <textarea id="chat-input" rows="1" placeholder="Message ${escapeHtml(char.name)}... (Use *asterisks* for actions)" aria-label="Chat message input"></textarea>
+                  <textarea id="chat-input" rows="1" placeholder="Message ${escapeHtml(char.name)}... (Use *asterisks* for actions)" aria-label="Chat message input">${escapeHtml(State.composerDraft || '')}</textarea>
                   ${State.isGenerating ? `
                     <button class="btn btn-danger" data-action="stop-generation" aria-label="Stop generating">${Icons.stop} Stop</button>
                   ` : `
@@ -4832,6 +5321,21 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               <button class="icon-btn" data-action="toggle-context-drawer" aria-label="Close context panel">${Icons.close}</button>
             </div>
             <div class="drawer-body">
+              <!-- Live Context & Token Budget Meter -->
+              <div class="context-budget-meter" style="padding:0.75rem 0.85rem; background:var(--bg-elevated); border:1px solid var(--border); border-radius:4px; margin-bottom:1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; font-weight:600; margin-bottom:0.35rem;">
+                  <span>Token Budget</span>
+                  <span style="color:var(--text-muted);">${(promptStats?.estimatedPromptTokens || 0).toLocaleString()} / ${(promptStats?.contextTokens || 28672).toLocaleString()} tokens</span>
+                </div>
+                <div style="height:6px; background:var(--bg); border-radius:3px; overflow:hidden; border:1px solid var(--border);">
+                  <div style="height:100%; width:${Math.min(100, Math.round(((promptStats?.estimatedPromptTokens || 0) / (promptStats?.contextTokens || 28672)) * 100))}%; background:var(--accent); transition:width 0.3s ease;"></div>
+                </div>
+                <div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.35rem; display:flex; justify-content:space-between;">
+                  <span>${promptStats?.historyKept || 0} / ${promptStats?.historyTotal || 0} messages kept</span>
+                  <span>${(promptStats?.loreTriggered || []).length} lore triggered</span>
+                </div>
+              </div>
+
               <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label" for="ctx-memory">Memory</label>
                 <span class="form-hint">Key facts kept near the top of context.</span>
@@ -4845,26 +5349,35 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               </div>
 
               <div style="border-top:1px solid var(--border); padding-top:1rem;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap; gap:0.4rem;">
                   <div>
                     <div class="form-label">Lorebook Entries (${(chat.lorebook || []).length})</div>
                     <div class="form-hint">Triggered by keywords in conversation.</div>
                   </div>
-                  <button class="mini-btn" data-action="add-lore-entry">${Icons.plus} Add Entry</button>
+                  <div style="display:flex; gap:0.4rem;">
+                    <button class="mini-btn" data-action="import-lorebook">${Icons.upload} Import .lorebook</button>
+                    <button class="mini-btn" data-action="add-lore-entry">${Icons.plus} Add Entry</button>
+                  </div>
                 </div>
 
                 <div style="display:flex; flex-direction:column; gap:0.65rem;">
-                  ${(chat.lorebook || []).map(entry => `
+                  ${(chat.lorebook || []).map(entry => {
+                    const isTriggered = (promptStats?.loreTriggeredIds || []).includes(entry.id);
+                    return `
                     <div class="lorebook-entry-card" data-lore-id="${escapeHtml(entry.id)}">
                       <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
-                        <input type="text" class="input-field lore-name-input" style="min-height:36px; padding:0.35rem 0.6rem; font-weight:600;" value="${escapeHtml(entry.name)}" placeholder="Entry Title" aria-label="Lorebook entry name">
+                        <div style="display:flex; align-items:center; gap:0.4rem; min-width:0; flex:1;">
+                          <input type="text" class="input-field lore-name-input" style="min-height:36px; padding:0.35rem 0.6rem; font-weight:600; flex:1; min-width:0;" value="${escapeHtml(entry.name)}" placeholder="Entry Title" aria-label="Lorebook entry name">
+                          ${isTriggered ? `<span class="badge" style="background:var(--accent); color:#fff; font-size:0.68rem; padding:0.15rem 0.45rem; border-radius:3px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap;">Triggered</span>` : ''}
+                        </div>
                         <input type="checkbox" class="switch-input lore-enabled-toggle" ${entry.enabled ? 'checked' : ''} title="Enable/Disable Entry" aria-label="Toggle lorebook entry">
                         <button class="icon-btn" style="width:34px;height:34px;color:var(--danger);" data-action="delete-lore-entry" data-lore-id="${escapeHtml(entry.id)}" aria-label="Delete lorebook entry">${Icons.trash}</button>
                       </div>
                       <input type="text" class="input-field lore-keys-input" style="min-height:36px; padding:0.35rem 0.6rem; font-size:0.8rem;" value="${escapeHtml((entry.keywords || []).join(', '))}" placeholder="Keywords (comma separated)" aria-label="Lorebook keywords">
                       <textarea class="textarea-field lore-text-input" style="min-height:68px; font-size:0.84rem; padding:0.45rem 0.6rem;" placeholder="Lore text...">${escapeHtml(entry.text)}</textarea>
                     </div>
-                  `).join('')}
+                  `;
+                  }).join('')}
                 </div>
               </div>
             </div>
@@ -4886,6 +5399,9 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       const activeAlt = msg.alternatives[altIndex] || { text: '' };
       const isEditing = State.editingMessageId === msg.id;
       const isLastCharMsg = !isUser && mIdx === totalMsgs - 1;
+      const parsed = !isUser ? extractMessageEmotion(activeAlt.text) : { cleanText: activeAlt.text, emotion: null };
+      const displayText = parsed.cleanText;
+      const messageEmotion = parsed.emotion;
 
       return `
         <div class="msg-row ${isUser ? 'user' : 'char'}" data-msg-id="${escapeHtml(msg.id)}">
@@ -4893,6 +5409,12 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           <div class="msg-content-wrap">
             <div class="msg-sender-line">
               <span class="msg-sender-name">${escapeHtml(senderName)}</span>
+              ${messageEmotion ? `
+                <span class="msg-mood-badge" title="Character Mood: ${escapeHtml(messageEmotion)}">
+                  <span class="msg-mood-dot"></span>
+                  <span>${escapeHtml(messageEmotion)}</span>
+                </span>
+              ` : ''}
             </div>
 
             <div class="msg-bubble">
@@ -4905,7 +5427,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   </div>
                 </div>
               ` : `
-                <div class="msg-text-body">${activeAlt.text ? formatRoleplayText(activeAlt.text) : (State.isGenerating && isLastCharMsg ? `<div class="typing-dots"><span></span><span></span><span></span></div>` : '')}</div>
+                <div class="msg-text-body">${displayText ? formatRoleplayText(displayText) : (State.isGenerating && isLastCharMsg ? `<div class="typing-dots"><span></span><span></span><span></span></div>` : '')}</div>
               `}
 
               ${activeAlt.imageLoading ? `
@@ -4954,6 +5476,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   <button class="msg-act-btn" data-action="regen-msg" data-msg-id="${escapeHtml(msg.id)}" title="Regenerate reply" aria-label="Regenerate reply">${Icons.refresh}</button>
                   <button class="msg-act-btn" data-action="continue-msg" data-msg-id="${escapeHtml(msg.id)}" title="Continue message" aria-label="Continue generating from this message">${Icons.fastForward} <span>Continue</span></button>
                 ` : ''}
+                <button class="msg-act-btn" data-action="fork-msg" data-msg-id="${escapeHtml(msg.id)}" title="Fork / Branch chat here" aria-label="Fork chat from this message">${Icons.branch} <span>Branch</span></button>
                 <button class="msg-act-btn" data-action="rewind-msg" data-msg-id="${escapeHtml(msg.id)}" title="Rewind chat to here" aria-label="Rewind chat to this message">${Icons.rewind}</button>
                 <button class="msg-act-btn" data-action="delete-msg" data-msg-id="${escapeHtml(msg.id)}" title="Delete message" aria-label="Delete message">${Icons.trash}</button>
               </div>
@@ -4963,7 +5486,9 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       `;
     }
 
-    function renderHistoryScreen(main) {
+    function renderHistoryResults() {
+      const container = document.getElementById('history-results');
+      if (!container) return;
       const allChats = Storage.getChats().sort((a, b) => b.updatedAt - a.updatedAt);
       const chars = Storage.getCharacters();
       const q = State.historySearchQuery.trim().toLowerCase();
@@ -4981,11 +5506,59 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         );
       });
 
+      const countEl = document.getElementById('history-count');
+      if (countEl) countEl.textContent = `(${filtered.length})`;
+
+      if (filtered.length === 0) {
+        container.innerHTML = `
+          <div style="text-align:center; padding:3rem 1rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:16px;">
+            <p style="font-weight:600; margin-bottom:0.5rem;">No chat sessions found</p>
+            <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1rem;">Start a conversation from the Discover screen to see your history here.</p>
+            <button class="btn btn-primary" data-action="nav" data-screen="discover">Browse Characters</button>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = `
+        <div style="display:flex; flex-direction:column; gap:0.75rem;">
+          ${filtered.map(chat => {
+            const ch = chars.find(x => x.id === chat.characterId) || { name: 'Unknown Character', avatar: makeSvgAvatar('?', '#333', '#111') };
+            const lastMsg = chat.messages[chat.messages.length - 1];
+            const lastText = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
+            const dateStr = new Date(chat.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            return `
+              <div class="char-card" style="flex-direction:row; align-items:center; justify-content:space-between; gap:1rem;" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}">
+                <div style="display:flex; align-items:center; gap:0.85rem; min-width:0; flex:1;">
+                  <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
+                  <div style="min-width:0; flex:1;">
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                      <span style="font-weight:700; font-size:0.98rem;">${escapeHtml(chat.title)}</span>
+                      <span class="badge">${escapeHtml(ch.name)}</span>
+                    </div>
+                    <div style="font-size:0.84rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:0.2rem;">
+                      ${escapeHtml(lastText.replace(/[*"]/g, '').slice(0, 90))}
+                    </div>
+                    <div style="font-size:0.74rem; color:var(--text-muted); margin-top:0.25rem;">${chat.messages.length} messages • ${escapeHtml(dateStr)}</div>
+                  </div>
+                </div>
+                <div style="display:flex; gap:0.25rem;">
+                  <button class="icon-btn" data-action="rename-chat" data-chat-id="${escapeHtml(chat.id)}" aria-label="Rename chat" title="Rename">${Icons.edit}</button>
+                  <button class="icon-btn" style="color:var(--danger);" data-action="delete-chat" data-chat-id="${escapeHtml(chat.id)}" aria-label="Delete chat" title="Delete">${Icons.trash}</button>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderHistoryScreen(main) {
       main.innerHTML = `
         <div class="top-bar">
           <div style="display:flex; align-items:center; gap:0.5rem;">
             ${State.historyFilterCharId ? `<button class="icon-btn" data-action="clear-history-filter" aria-label="Show all characters">${Icons.back}</button>` : ''}
-            <div class="top-bar-title">Chat History (${filtered.length})</div>
+            <div class="top-bar-title">Chat History <span id="history-count"></span></div>
           </div>
           ${State.historyFilterCharId ? `<button class="btn btn-secondary" data-action="clear-history-filter">Show All Characters</button>` : ''}
         </div>
@@ -4996,57 +5569,18 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               <input type="search" id="history-search-input" class="search-input" placeholder="Search saved conversations..." value="${escapeHtml(State.historySearchQuery)}" aria-label="Search chat history">
             </div>
 
-            ${filtered.length === 0 ? `
-              <div style="text-align:center; padding:3rem 1rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:16px;">
-                <p style="font-weight:600; margin-bottom:0.5rem;">No chat sessions found</p>
-                <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1rem;">Start a conversation from the Discover screen to see your history here.</p>
-                <button class="btn btn-primary" data-action="nav" data-screen="discover">Browse Characters</button>
-              </div>
-            ` : `
-              <div style="display:flex; flex-direction:column; gap:0.75rem;">
-                ${filtered.map(chat => {
-        const ch = chars.find(x => x.id === chat.characterId) || { name: 'Unknown Character', avatar: makeSvgAvatar('?', '#333', '#111') };
-        const lastMsg = chat.messages[chat.messages.length - 1];
-        const lastText = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
-        const dateStr = new Date(chat.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-        return `
-                    <div class="char-card" style="flex-direction:row; align-items:center; justify-content:space-between; gap:1rem;" data-action="open-chat" data-chat-id="${escapeHtml(chat.id)}" data-char-id="${escapeHtml(ch.id)}">
-                      <div style="display:flex; align-items:center; gap:0.85rem; min-width:0; flex:1;">
-                        <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
-                        <div style="min-width:0; flex:1;">
-                          <div style="display:flex; align-items:center; gap:0.5rem;">
-                            <span style="font-weight:700; font-size:0.98rem;">${escapeHtml(chat.title)}</span>
-                            <span class="badge">${escapeHtml(ch.name)}</span>
-                          </div>
-                          <div style="font-size:0.84rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:0.2rem;">
-                            ${escapeHtml(lastText.replace(/[*"]/g, '').slice(0, 90))}
-                          </div>
-                          <div style="font-size:0.74rem; color:var(--text-muted); margin-top:0.25rem;">${chat.messages.length} messages • ${escapeHtml(dateStr)}</div>
-                        </div>
-                      </div>
-                      <div style="display:flex; gap:0.25rem;">
-                        <button class="icon-btn" data-action="rename-chat" data-chat-id="${escapeHtml(chat.id)}" aria-label="Rename chat" title="Rename">${Icons.edit}</button>
-                        <button class="icon-btn" style="color:var(--danger);" data-action="delete-chat" data-chat-id="${escapeHtml(chat.id)}" aria-label="Delete chat" title="Delete">${Icons.trash}</button>
-                      </div>
-                    </div>
-                  `;
-      }).join('')}
-              </div>
-            `}
+            <div id="history-results"></div>
           </div>
         </div>
       `;
+
+      renderHistoryResults();
 
       const input = document.getElementById('history-search-input');
       if (input) {
         input.addEventListener('input', (e) => {
           State.historySearchQuery = e.target.value;
-          renderMainView();
-          const el = document.getElementById('history-search-input');
-          if (el) {
-            el.focus();
-            el.setSelectionRange(el.value.length, el.value.length);
-          }
+          renderHistoryResults();
         });
       }
     }
@@ -5075,10 +5609,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             <div class="top-bar-title">${existing ? (isSeed ? `Clone & Customize ${escapeHtml(existing.name)}` : `Edit ${escapeHtml(existing.name)}`) : 'Create Character'}</div>
           </div>
           <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-            <button class="btn btn-secondary" data-action="import-char-json">${Icons.upload} <span>Import JSON</span></button>
+            <button class="btn btn-secondary" data-action="import-char-file">${Icons.upload} <span>Import Card / JSON</span></button>
             ${existing ? `
               <button class="btn btn-secondary" data-action="duplicate-char" data-char-id="${escapeHtml(existing.id)}">${Icons.copy} <span>Duplicate</span></button>
-              <button class="btn btn-secondary" data-action="export-char" data-char-id="${escapeHtml(existing.id)}">${Icons.download} <span>Export</span></button>
+              <button class="btn btn-secondary" data-action="export-char-card" data-char-id="${escapeHtml(existing.id)}">${Icons.image} <span>Export Card (PNG)</span></button>
+              <button class="btn btn-secondary" data-action="export-char" data-char-id="${escapeHtml(existing.id)}">${Icons.download} <span>Export JSON</span></button>
               ${!isSeed ? `<button class="btn btn-danger" data-action="delete-char" data-char-id="${escapeHtml(existing.id)}" title="Delete Character">${Icons.trash}</button>` : ''}
             ` : ''}
           </div>
@@ -5151,6 +5686,21 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                     <option value="private" ${draft.visibility === 'private' ? 'selected' : ''}>Private</option>
                   </select>
                 </div>
+              </div>
+
+              <div style="border-top:1px solid var(--border); padding-top:1rem; margin-top:0.5rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; flex-wrap:wrap; gap:0.4rem;">
+                  <div>
+                    <div class="form-label">Default Lorebook Entries (${(draft.lorebook || []).length})</div>
+                    <div class="form-hint">Embedded world lore copied automatically into all new chats with this character.</div>
+                  </div>
+                  <button type="button" class="mini-btn" data-action="editor-import-lorebook">${Icons.upload} Import .lorebook</button>
+                </div>
+                ${(draft.lorebook || []).length > 0 ? `
+                  <div style="display:flex; flex-wrap:wrap; gap:0.4rem; max-height:120px; overflow-y:auto; padding:0.5rem; background:var(--bg-surface); border:1px solid var(--border); border-radius:4px;">
+                    ${(draft.lorebook || []).map(l => `<span class="badge" title="${escapeHtml((l.keywords || []).join(', '))}: ${escapeHtml(l.text || '')}">${escapeHtml(l.name)}</span>`).join('')}
+                  </div>
+                ` : ''}
               </div>
 
               <div style="display:flex; justify-content:flex-end; gap:0.75rem; margin-top:0.5rem;">
@@ -5360,11 +5910,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               <div class="form-group" style="margin-top:0.75rem;">
                 <label class="form-label" for="img-director-model">AI Visual Director (2-Step Pipeline)</label>
                 <select id="img-director-model" class="select-field">
-                  <option value="glm-4-6" ${s.imageGen.promptDirectorModel !== 'xialong-v1' && s.imageGen.promptDirectorModel !== 'off' ? 'selected' : ''}>GLM-4.6 (Recomendado — Alta fidelidad de escena y perfil)</option>
-                  <option value="xialong-v1" ${s.imageGen.promptDirectorModel === 'xialong-v1' ? 'selected' : ''}>Xialong-v1 (Rápido)</option>
-                  <option value="off" ${s.imageGen.promptDirectorModel === 'off' ? 'selected' : ''}>Desactivado (Solo etiquetas directas)</option>
+                  <option value="glm-4-6" ${s.imageGen.promptDirectorModel !== 'xialong-v1' && s.imageGen.promptDirectorModel !== 'off' ? 'selected' : ''}>GLM-4.6 (Recommended — High fidelity scene & profile)</option>
+                  <option value="xialong-v1" ${s.imageGen.promptDirectorModel === 'xialong-v1' ? 'selected' : ''}>Xialong-v1 (Fast)</option>
+                  <option value="off" ${s.imageGen.promptDirectorModel === 'off' ? 'selected' : ''}>Disabled (Direct tags only)</option>
                 </select>
-                <span class="form-hint">El LLM lee el diálogo y el perfil del personaje para sintetizar prompts especializados según la guía de NovelAI V5 (Global + Personaje aislado).</span>
+                <span class="form-hint">The LLM reads dialogue and character profiles to synthesize specialized prompts following the NovelAI V5 guide (Global + Character-specific).</span>
               </div>
 
               <div class="form-group">
@@ -5600,6 +6150,43 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       updateChatInStorage(chat);
       await renderMainView();
 
+      let rafId = null;
+      let updatePending = false;
+
+      const updateMoodBadgeDom = (emotion) => {
+        const senderLine = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-sender-line`);
+        if (senderLine) {
+          let badge = senderLine.querySelector('.msg-mood-badge');
+          if (emotion) {
+            if (!badge) {
+              badge = document.createElement('span');
+              badge.className = 'msg-mood-badge';
+              senderLine.appendChild(badge);
+            }
+            badge.title = `Character Mood: ${emotion}`;
+            badge.innerHTML = `<span class="msg-mood-dot"></span><span>${escapeHtml(emotion)}</span>`;
+          } else if (badge) {
+            badge.remove();
+          }
+        }
+      };
+
+      const scheduleDomUpdate = () => {
+        if (updatePending) return;
+        updatePending = true;
+        rafId = requestAnimationFrame(() => {
+          updatePending = false;
+          const currentText = msgObj.alternatives[altIdx].text;
+          const { cleanText, emotion } = extractMessageEmotion(currentText);
+          const row = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-text-body`);
+          if (row) {
+            row.innerHTML = formatStreamingText(cleanText);
+            scrollToChatBottom();
+          }
+          updateMoodBadgeDom(emotion);
+        });
+      };
+
       try {
         const finalReply = await API.generateReply({
           character: char,
@@ -5613,20 +6200,25 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           continueFrom: continueText,
           onToken(chunk) {
             msgObj.alternatives[altIdx].text += chunk;
-            const row = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-text-body`);
-            if (row) {
-              row.innerHTML = formatRoleplayText(msgObj.alternatives[altIdx].text);
-              scrollToChatBottom();
-            }
+            scheduleDomUpdate();
           }
         });
+        if (rafId) cancelAnimationFrame(rafId);
         msgObj.alternatives[altIdx].text = finalReply;
+        const { cleanText: finalClean, emotion: finalEmotion } = extractMessageEmotion(finalReply);
+        const row = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-text-body`);
+        if (row) {
+          row.innerHTML = formatRoleplayText(finalClean);
+          scrollToChatBottom();
+        }
+        updateMoodBadgeDom(finalEmotion);
         updateChatInStorage(chat);
 
         if (settings.showSuggestions) {
           State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
         }
       } catch (err) {
+        if (rafId) cancelAnimationFrame(rafId);
         if (err.name === 'AbortError') {
           if (!msgObj.alternatives[altIdx].text) {
             msgObj.alternatives[altIdx].text = '*[Generation stopped by user]*';
@@ -5638,6 +6230,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           });
         }
       } finally {
+        if (rafId) cancelAnimationFrame(rafId);
         State.isGenerating = false;
         State.abortController = null;
         await renderMainView();
@@ -5657,6 +6250,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       if (!text) return;
 
       if (inputEl) inputEl.value = '';
+      State.composerDraft = '';
 
       chat.messages.push({
         id: 'msg_' + Date.now(),
@@ -5692,9 +6286,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         } else {
           const recentMsgs = (chat.messages || []).slice(-3);
           sceneText = recentMsgs.map(m => {
-            const t = m.alternatives[m.selectedIndex]?.text || '';
+            const rawT = m.alternatives[m.selectedIndex]?.text || '';
+            const { cleanText: cleanT, emotion } = extractMessageEmotion(rawT);
             const sender = m.role === 'user' ? 'User' : (char?.name || 'Character');
-            return `${sender}: ${t.replace(/[*_#]/g, ' ').slice(0, 200)}`;
+            const emTag = emotion ? ` (Mood: ${emotion})` : '';
+            return `${sender}${emTag}: ${cleanT.replace(/[*_#]/g, ' ').slice(0, 200)}`;
           }).join('\n') || `${char?.name || 'Character'}, ${char?.tagline || 'cinematic scene'}`;
         }
 
@@ -5718,9 +6314,14 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         const prevMsg = msgIdx > 0 ? chat.messages[msgIdx - 1] : null;
         const prevText = prevMsg ? (prevMsg.alternatives[prevMsg.selectedIndex]?.text || '') : '';
         const thisText = alt.text || '';
-        sceneText = prevText ? `User: ${prevText.replace(/[*_#]/g, ' ').slice(0, 160)}\n${char?.name || 'Character'}: ${thisText.replace(/[*_#]/g, ' ').slice(0, 300)}` : thisText.replace(/[*_#]/g, ' ').slice(0, 400);
+        const { cleanText: thisClean, emotion: thisEmotion } = extractMessageEmotion(thisText);
+        const emotionContext = thisEmotion ? `\n[Character Emotion: ${thisEmotion}]` : '';
 
-        alt.imagePrompt = alt.imagePrompt || alt.text.replace(/[*"]/g, '').slice(0, 90) || char?.name || 'Scene';
+        sceneText = prevText
+          ? `User: ${prevText.replace(/[*_#]/g, ' ').slice(0, 160)}\n${char?.name || 'Character'}: ${thisClean.replace(/[*_#]/g, ' ').slice(0, 300)}${emotionContext}`
+          : `${thisClean.replace(/[*_#]/g, ' ').slice(0, 400)}${emotionContext}`;
+
+        alt.imagePrompt = alt.imagePrompt || thisClean.replace(/[*"]/g, '').slice(0, 90) || char?.name || 'Scene';
         alt.imageLoading = true;
         alt.imageLoadingStatus = 'Directing visual scene with AI...';
       }
@@ -5799,6 +6400,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       const inputEl = document.getElementById('chat-input');
       if (inputEl) {
         inputEl.addEventListener('input', () => {
+          State.composerDraft = inputEl.value;
           inputEl.style.height = 'auto';
           inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
         });
@@ -6201,6 +6803,19 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             message: `Permanently delete "${char.name}" and all associated chats? This cannot be undone.`,
             confirmLabel: 'Delete Character',
             onConfirm() {
+              if (char.avatar && char.avatar.startsWith('idb:')) {
+                ImageStore.delete(char.avatar);
+              }
+              const associatedChats = Storage.getChats().filter(c => c.characterId === charId);
+              for (const c of associatedChats) {
+                for (const m of (c.messages || [])) {
+                  for (const alt of (m.alternatives || [])) {
+                    if (alt.imageUrl && alt.imageUrl.startsWith('idb:')) {
+                      ImageStore.delete(alt.imageUrl);
+                    }
+                  }
+                }
+              }
               Storage.saveCharacters(Storage.getCharacters().filter(c => c.id !== charId));
               Storage.saveChats(Storage.getChats().filter(c => c.characterId !== charId));
               showToast(`Deleted "${char.name}".`, 'info');
@@ -6219,12 +6834,32 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           break;
         }
 
+        case 'export-char-card': {
+          const char = await API.getCharacter(btn.getAttribute('data-char-id'));
+          if (char) {
+            await exportCharacterCardPng(char);
+          }
+          break;
+        }
+
+        case 'import-char-file':
         case 'import-char-json': {
-          promptJsonImport(async (data) => {
-            if (!data.name) throw new Error('Character JSON missing "name" field.');
-            const saved = await API.saveCharacter({ ...data, id: '' });
-            showToast(`Imported character "${saved.name}".`, 'success');
-            State.editorCharacterId = saved.id;
+          promptCharacterFileImport();
+          break;
+        }
+
+        case 'editor-import-lorebook': {
+          promptLorebookImport((entries) => {
+            if (State.editorCharacterId) {
+              const allChars = Storage.getCharacters();
+              const draft = allChars.find(c => c.id === State.editorCharacterId);
+              if (draft) {
+                draft.lorebook = draft.lorebook || [];
+                draft.lorebook.push(...entries);
+                Storage.saveCharacters(allChars);
+              }
+            }
+            showToast(`Added ${entries.length} lorebook entries to character.`, 'success');
             renderMainView();
           });
           break;
@@ -6233,13 +6868,54 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         case 'toggle-chat-menu': {
           e.stopPropagation();
           State.chatMenuOpen = !State.chatMenuOpen;
-          renderMainView();
+          const menuBtn = document.querySelector('[data-action="toggle-chat-menu"]');
+          if (menuBtn) menuBtn.setAttribute('aria-expanded', String(State.chatMenuOpen));
+          const existingMenu = document.querySelector('.dropdown-menu');
+          if (State.chatMenuOpen) {
+            if (!existingMenu && menuBtn) {
+              const chat = getActiveChat();
+              const char = chat ? Storage.getCharacters().find(c => c.id === chat.characterId) : null;
+              if (char) {
+                const drop = document.createElement('div');
+                drop.className = 'dropdown-menu';
+                drop.setAttribute('role', 'menu');
+                drop.innerHTML = `
+                  <button class="dropdown-item" data-action="view-profile" data-char-id="${escapeHtml(char.id)}">${Icons.user} View Character Profile</button>
+                  <button class="dropdown-item" data-action="new-chat-for-char" data-char-id="${escapeHtml(char.id)}">${Icons.plus} Start New Chat</button>
+                  <button class="dropdown-item" data-action="char-chat-history" data-char-id="${escapeHtml(char.id)}">${Icons.chat} Saved Chats (${Storage.getChats().filter(c => c.characterId === char.id).length})</button>
+                  <button class="dropdown-item" data-action="export-chat">${Icons.download} Export Chat JSON</button>
+                  <button class="dropdown-item" data-action="import-chat">${Icons.upload} Import Chat JSON</button>
+                  <button class="dropdown-item danger" data-action="clear-chat">${Icons.trash} Clear Current Chat</button>
+                `;
+                menuBtn.parentElement.appendChild(drop);
+              }
+            }
+          } else {
+            if (existingMenu) existingMenu.remove();
+          }
           break;
         }
 
         case 'toggle-context-drawer': {
           State.contextDrawerOpen = !State.contextDrawerOpen;
-          renderMainView();
+          const drawer = document.getElementById('context-drawer');
+          const drawerBtn = document.querySelector('[data-action="toggle-context-drawer"]');
+          if (drawer) {
+            if (State.contextDrawerOpen) {
+              drawer.classList.remove('hidden');
+            } else {
+              drawer.classList.add('hidden');
+            }
+          }
+          if (drawerBtn) {
+            if (State.contextDrawerOpen) {
+              drawerBtn.classList.remove('btn-secondary');
+              drawerBtn.classList.add('btn-primary');
+            } else {
+              drawerBtn.classList.remove('btn-primary');
+              drawerBtn.classList.add('btn-secondary');
+            }
+          }
           break;
         }
 
@@ -6287,7 +6963,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           if (chat && char) {
             btn.classList.add('spin');
             btn.disabled = true;
-            showToast('Generando sugerencias de respuesta...', 'info');
+            showToast('Generating reply suggestions...', 'info');
             try {
               State.suggestedReplies = await API.suggestReplies({
                 character: char,
@@ -6298,10 +6974,10 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               s.showSuggestions = true;
               Storage.saveSettings(s);
               await renderMainView();
-              showToast('Sugerencias actualizadas', 'success');
+              showToast('Suggestions updated.', 'success');
             } catch (err) {
-              console.error('Error al actualizar sugerencias:', err);
-              showToast('No se pudieron generar sugerencias', 'error');
+              console.error('Failed to update suggestions:', err);
+              showToast('Failed to generate suggestions.', 'error');
             } finally {
               btn.classList.remove('spin');
               btn.disabled = false;
@@ -6466,6 +7142,35 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           break;
         }
 
+        case 'fork-msg': {
+          const msgId = btn.getAttribute('data-msg-id');
+          const chat = getActiveChat();
+          if (!chat) break;
+          const idx = chat.messages.findIndex(m => m.id === msgId);
+          const branchedMessages = (idx >= 0 ? chat.messages.slice(0, idx + 1) : chat.messages).map(m => ({
+            ...m,
+            id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            alternatives: (m.alternatives || []).map(a => ({ ...a }))
+          }));
+          const newChat = {
+            ...chat,
+            id: 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            title: `${chat.title} (Branch)`,
+            messages: branchedMessages,
+            lorebook: (chat.lorebook || []).map(l => ({ ...l, id: 'lore_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6) })),
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          };
+          const allChats = Storage.getChats();
+          allChats.unshift(newChat);
+          Storage.saveChats(allChats);
+          State.activeChatId = newChat.id;
+          State.screen = 'chat';
+          showToast(`Branched to "${newChat.title}"`, 'success');
+          renderMainView();
+          break;
+        }
+
         case 'rewind-msg': {
           const msgId = btn.getAttribute('data-msg-id');
           const chat = getActiveChat();
@@ -6497,6 +7202,14 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             message: 'Remove this message from the chat history?',
             confirmLabel: 'Delete',
             onConfirm() {
+              const target = chat.messages.find(m => m.id === msgId);
+              if (target && target.alternatives) {
+                for (const alt of target.alternatives) {
+                  if (alt.imageUrl && alt.imageUrl.startsWith('idb:')) {
+                    ImageStore.delete(alt.imageUrl);
+                  }
+                }
+              }
               chat.messages = chat.messages.filter(m => m.id !== msgId);
               updateChatInStorage(chat);
               renderMainView();
@@ -6515,6 +7228,13 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             message: `Reset this conversation back to ${char.name}'s opening greeting?`,
             confirmLabel: 'Clear Chat',
             onConfirm() {
+              for (const m of chat.messages) {
+                for (const alt of (m.alternatives || [])) {
+                  if (alt.imageUrl && alt.imageUrl.startsWith('idb:')) {
+                    ImageStore.delete(alt.imageUrl);
+                  }
+                }
+              }
               chat.messages = [{
                 id: 'msg_' + Date.now(),
                 role: 'char',
@@ -6554,6 +7274,19 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             updateChatInStorage(imported);
             State.activeChatId = imported.id;
             showToast('Imported chat session.', 'success');
+            renderMainView();
+          });
+          break;
+        }
+
+        case 'import-lorebook': {
+          promptLorebookImport((entries) => {
+            const chat = getActiveChat();
+            if (!chat) return;
+            chat.lorebook = chat.lorebook || [];
+            chat.lorebook.push(...entries);
+            updateChatInStorage(chat);
+            showToast(`Imported ${entries.length} lorebook entries.`, 'success');
             renderMainView();
           });
           break;
@@ -6608,6 +7341,16 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             message: 'Permanently delete this conversation history?',
             confirmLabel: 'Delete',
             onConfirm() {
+              const chatToDelete = Storage.getChats().find(c => c.id === chatId);
+              if (chatToDelete && chatToDelete.messages) {
+                for (const m of chatToDelete.messages) {
+                  for (const alt of (m.alternatives || [])) {
+                    if (alt.imageUrl && alt.imageUrl.startsWith('idb:')) {
+                      ImageStore.delete(alt.imageUrl);
+                    }
+                  }
+                }
+              }
               Storage.saveChats(Storage.getChats().filter(c => c.id !== chatId));
               if (State.activeChatId === chatId) State.activeChatId = null;
               renderMainView();
@@ -6762,10 +7505,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       const chats = Storage.getChats();
       Storage.getSettings();
 
-      // 4. Preload all idb image blobs into memory cache for instantaneous sync rendering
-      await ImageStore.preloadAll(chats, chars, personas);
-
-      // 5. Render main view
+      // 4. Render main view (images are lazily resolved by ImageStore on-demand)
       await renderMainView();
 
       if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {

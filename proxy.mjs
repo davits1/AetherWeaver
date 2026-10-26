@@ -175,6 +175,16 @@ async function handleProxy(req, res, url) {
   const route = Object.prototype.hasOwnProperty.call(ROUTES, routeName) ? ROUTES[routeName] : null;
   if (!route) return sendJson(res, 403, { error: `Route "/proxy/${routeName}" is not allowed.` });
 
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (!['GET', 'POST', 'HEAD'].includes(req.method)) {
     return sendJson(res, 405, { error: `Method ${req.method} not allowed.` });
   }
@@ -195,12 +205,13 @@ async function handleProxy(req, res, url) {
   if (clientAuth) {
     headers['Authorization'] = clientAuth; // optional per-browser override from Settings
   } else if (route.novelai) {
-    if (!NOVELAI_TOKEN) {
+    const activeToken = process.env.NOVELAI_TOKEN || NOVELAI_TOKEN;
+    if (!activeToken) {
       return sendJson(res, 401, {
         error: 'No NovelAI token configured. Set NOVELAI_TOKEN in the environment or .env, or enter a token override in Settings.'
       });
     }
-    headers['Authorization'] = `Bearer ${NOVELAI_TOKEN}`;
+    headers['Authorization'] = `Bearer ${activeToken.replace(/^Bearer\s+/i, '')}`;
   }
 
   const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : await readBody(req);
@@ -225,44 +236,6 @@ async function handleProxy(req, res, url) {
   } catch (err) {
     if (upstreamAbort.signal.aborted) { log(`${req.method} ${url.pathname} client aborted before response`); return; }
     throw err;
-  }
-
-  // Intercept NovelAI image generation: unpack the ZIP archive in-memory, save PNG locally, and serve
-  if (routeName === 'image' && restPath === '/ai/generate-image' && upstream.status === 200) {
-    const chunks = [];
-    if (upstream.body) {
-      for await (const chunk of upstream.body) {
-        chunks.push(chunk);
-      }
-    }
-    const rawZip = Buffer.concat(chunks);
-    const pngBuf = extractPngBuffer(rawZip);
-    const filename = `nai_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
-    const genDir = path.join(ROOT, 'generated_images');
-    try { mkdirSync(genDir, { recursive: true }); } catch {}
-    writeFileSync(path.join(genDir, filename), pngBuf);
-
-    const wantsJson = (req.headers['accept'] || '').includes('application/json') ||
-                      (req.headers['x-return-format'] === 'json');
-    if (wantsJson) {
-      log(`${req.method} ${url.pathname} -> 200 saved /generated_images/${filename} (${pngBuf.length}B) in ${Date.now() - started}ms`);
-      return sendJson(res, 200, {
-        ok: true,
-        url: `/generated_images/${filename}`,
-        filename,
-        size: pngBuf.length
-      });
-    }
-
-    res.writeHead(200, {
-      'Content-Type': 'image/png',
-      'Content-Length': pngBuf.length,
-      'X-Image-Url': `/generated_images/${filename}`,
-      'Cache-Control': 'public, max-age=31536000, immutable'
-    });
-    res.end(pngBuf);
-    log(`${req.method} ${url.pathname} -> 200 saved /generated_images/${filename} (${pngBuf.length}B) in ${Date.now() - started}ms`);
-    return;
   }
 
   // Pass through status + content-type. Node's fetch already decoded any gzip/br body,
