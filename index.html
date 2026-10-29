@@ -2120,7 +2120,7 @@
       CHARS_PER_TOKEN: 3.2,       // approximation; slightly overestimates tokens for English (safer)
       SAFETY_TOKENS: 64,
       STOPPED_PLACEHOLDER: '*[Generation stopped by user]*',
-      DEFAULT_PREAMBLE: 'The following is a roleplay chat between {{user}} and {{char}}. Continue the script by writing only {{char}}\'s next reply. Stay in character, write actions in *asterisks* and spoken dialogue in "quotes", and never write lines, actions, or thoughts for {{user}}.',
+      DEFAULT_PREAMBLE: 'The following is a roleplay chat between {{user}} and {{char}}. Continue the script by writing only {{char}}\'s next reply. Stay in character, write actions in *asterisks* and spoken dialogue in "quotes", and never write lines, actions, or thoughts for {{user}}. Keep replies to 1 or 2 complete paragraphs, concluding naturally with complete sentences and closed quotes and actions.',
       streamUnsupported: false,   // set for this session once stream:true is proven unsupported
 
       estimateTokens(str) {
@@ -2172,7 +2172,63 @@
         return best;
       },
 
-      buildRequest({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, continueFrom }) {
+      /** Detects if roleplay text ends abruptly mid-sentence, mid-word, or with unclosed quotes/asterisks. */
+      isTruncated(text) {
+        if (!text || typeof text !== 'string') return false;
+        const trimmed = text.trim();
+        if (!trimmed) return false;
+
+        // 1. Unbalanced double quotes
+        const doubleQuotes = (trimmed.match(/"/g) || []).length;
+        if (doubleQuotes % 2 !== 0) return true;
+
+        // 2. Unbalanced asterisks
+        const asterisks = (trimmed.match(/\*/g) || []).length;
+        if (asterisks % 2 !== 0) return true;
+
+        // 3. Must end with terminal punctuation (. ! ? …) optionally followed by quotes/asterisks/closing parens
+        const endsWithTerminal = /[.!?…]["'”’*)]*$/.test(trimmed);
+        if (!endsWithTerminal) return true;
+
+        return false;
+      },
+
+      /** Safely trims back to the last complete sentence boundary or gracefully heals punctuation. */
+      cleanTruncatedEnding(text) {
+        if (!text || typeof text !== 'string') return text;
+        const trimmed = text.trim();
+        if (!this.isTruncated(trimmed)) return trimmed;
+
+        // Search for last position where a sentence ended with balanced quotes and asterisks
+        const regex = /[.!?…]["'”’*)]*(?=\s+|$)/g;
+        let match;
+        let lastGoodIndex = -1;
+
+        while ((match = regex.exec(trimmed)) !== null) {
+          const candidate = trimmed.slice(0, match.index + match[0].length).trim();
+          const dq = (candidate.match(/"/g) || []).length;
+          const ast = (candidate.match(/\*/g) || []).length;
+          if (dq % 2 === 0 && ast % 2 === 0) {
+            lastGoodIndex = match.index + match[0].length;
+          }
+        }
+
+        // If we found a clean prior sentence that keeps at least 35% of the reply, trim to it
+        if (lastGoodIndex > 0 && lastGoodIndex >= trimmed.length * 0.35) {
+          return trimmed.slice(0, lastGoodIndex).trim();
+        }
+
+        // Fallback: repair trailing broken word and unclosed quotes/asterisks
+        let repaired = trimmed.replace(/\s+[a-zA-Z0-9'\-]{1,6}$/, '');
+        if (!/[.!?…]$/.test(repaired)) repaired += '...';
+        const dq = (repaired.match(/"/g) || []).length;
+        const ast = (repaired.match(/\*/g) || []).length;
+        if (dq % 2 !== 0) repaired += '"';
+        if (ast % 2 !== 0) repaired += '*';
+        return repaired;
+      },
+
+      buildRequest({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, continueFrom, _overrideMaxTokens = null }) {
         const adv = settings.advancedText || {};
         const prov = settings.provider || {};
         const charName = String((character && character.name) || 'Character').trim();
@@ -2180,7 +2236,16 @@
         const fill = (s) => this.fillNames(s, charName, userName).trim();
         const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 
-        const maxTokens = Math.max(1, Math.round(num(adv.maxTokens, 220)));
+        let defaultForLength = 340;
+        if (settings?.responseLength === 'short') defaultForLength = 200;
+        else if (settings?.responseLength === 'long') defaultForLength = 480;
+
+        let userMax = num(adv.maxTokens, 0);
+        if (!userMax || userMax === 220) {
+          userMax = defaultForLength;
+        }
+
+        const maxTokens = Math.max(1, Math.round(_overrideMaxTokens || userMax));
         let contextTokens = parseInt(prov.contextTokens, 10);
         if (!Number.isFinite(contextTokens) || contextTokens < 1024) contextTokens = this.DEFAULT_CONTEXT_TOKENS;
         const budget = contextTokens - maxTokens - this.SAFETY_TOKENS;
@@ -2321,10 +2386,10 @@
         return err;
       },
 
-      async generate({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, signal, onToken, continueFrom = '', _forceNoStream = false }) {
+      async generate({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, signal, onToken, continueFrom = '', _forceNoStream = false, _autoContinuationCount = 0, _overrideMaxTokens = null }) {
         if (signal && signal.aborted) throw new DOMException('Generation aborted', 'AbortError');
 
-        const req = this.buildRequest({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, continueFrom });
+        const req = this.buildRequest({ character, persona, messages, memory, authorsNote, lorebookEntries, settings, continueFrom, _overrideMaxTokens });
         const prov = settings.provider || {};
         const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
         const rawProxy = String(prov.proxyBase || '').trim().replace(/\/+$/, '');
@@ -2506,12 +2571,256 @@
         }
 
         const body = gen.replace(/\s+$/, '');
-        if (req.isContinue) return continueFrom + body;
-        const finalText = (prefix + body).trim();
+        let finalText = req.isContinue ? continueFrom + body : (prefix + body).trim();
         if (!finalText) {
           throw new Error('NovelAI returned an empty reply (it may have hit a stop sequence immediately). Try again.');
         }
+
+        // Automatic smart continuation:
+        // If the model stopped due to token limit (did NOT hit a stop sequence) AND the text ends prematurely,
+        // seamlessly request a continuation pass to finish the sentence and close the turn.
+        if (!hitStop && this.isTruncated(finalText) && _autoContinuationCount < 1 && (!signal || !signal.aborted)) {
+          try {
+            return await this.generate({
+              character,
+              persona,
+              messages,
+              memory,
+              authorsNote,
+              lorebookEntries,
+              settings,
+              signal,
+              onToken,
+              continueFrom: finalText,
+              _autoContinuationCount: _autoContinuationCount + 1,
+              _overrideMaxTokens: 160
+            });
+          } catch (autoErr) {
+            if (signal && signal.aborted) throw autoErr;
+            console.warn('[NovelAIText] Seamless auto-continuation failed, falling back to clean sentence trimming:', autoErr);
+          }
+        }
+
+        // Clean boundary trim fallback: ensures the reply never ends on a broken word or unclosed quote
+        if (this.isTruncated(finalText)) {
+          finalText = this.cleanTruncatedEnding(finalText);
+        }
+
         return finalText;
+      },
+
+      /**
+       * Direct prompt completion helper supporting streaming or non-streaming responses.
+       * Used for scenario opening generation, character profiling, etc.
+       */
+      async generateRaw({
+        prompt,
+        model = 'xialong-v1',
+        maxTokens = 320,
+        temperature = 1.1,
+        repetitionPenalty = 1.04,
+        stop = [],
+        settings,
+        signal,
+        onToken,
+        prefill = '',
+        _forceNoStream = false
+      }) {
+        if (signal && signal.aborted) throw new DOMException('Generation aborted', 'AbortError');
+
+        const prov = settings?.provider || {};
+        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const rawProxy = String(prov.proxyBase || '').trim().replace(/\/+$/, '');
+        const isDirect = !rawProxy || (!isLocal && (rawProxy === '/proxy' || rawProxy === 'direct'));
+        const url = isDirect
+          ? 'https://text.novelai.net/oa/v1/completions'
+          : `${rawProxy || '/proxy'}/text/oa/v1/completions`;
+        const headers = { 'Content-Type': 'application/json' };
+        const override = String(prov.apiKey || '').trim();
+        if (override && !/^https?:\/\//i.test(override)) {
+          headers.Authorization = 'Bearer ' + override.replace(/^Bearer\s+/i, '');
+        } else if (isDirect) {
+          throw new Error('NovelAI API token is required. Please go to Settings (gear icon) and enter your NovelAI API token.');
+        }
+
+        const payload = {
+          model: this.MODELS.includes(model) ? model : this.DEFAULT_MODEL,
+          prompt,
+          max_tokens: Math.max(1, Math.round(maxTokens)),
+          temperature: typeof temperature === 'number' ? temperature : 1.1,
+          min_length: 1,
+          top_p: 0.938,
+          top_k: 60,
+          top_a: 1.0,
+          typical_p: 1.0,
+          tail_free_sampling: 1.0,
+          repetition_penalty: typeof repetitionPenalty === 'number' ? repetitionPenalty : 1.04,
+          repetition_penalty_range: 2048,
+          repetition_penalty_slope: 0,
+          repetition_penalty_frequency: 0,
+          repetition_penalty_presence: 0.05,
+          min_p: 0.024,
+          stop: stop.filter(Boolean)
+        };
+
+        const stops = payload.stop;
+        const maxStop = stops.reduce((m, s) => Math.max(m, s.length), 0);
+        let raw = '';
+        let gen = '';
+        let sent = 0;
+        let hitStop = false;
+        const emit = (chunk) => { if (chunk && typeof onToken === 'function') onToken(chunk); };
+        const feed = (delta, final) => {
+          if (hitStop) return true;
+          if (prefill === '*' && !sent && delta.startsWith('*')) {
+            delta = delta.slice(1);
+          }
+          raw += delta;
+          gen = raw;
+          let cut = -1;
+          const from = Math.max(0, sent - maxStop);
+          for (const s of stops) {
+            const i = gen.indexOf(s, from);
+            if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+          }
+          if (cut !== -1) { gen = gen.slice(0, cut); hitStop = true; }
+          const safe = (hitStop || final) ? gen.length : gen.length - this.partialStopSuffix(gen, stops);
+          if (safe > sent) { emit(gen.slice(sent, safe)); sent = safe; }
+          return hitStop;
+        };
+
+        const ctrl = new AbortController();
+        const relayAbort = () => ctrl.abort();
+        if (signal) signal.addEventListener('abort', relayAbort, { once: true });
+
+        const abortError = () => {
+          const e = new DOMException('Generation aborted', 'AbortError');
+          e.partialText = (prefill || '') + gen.slice(0, sent);
+          return e;
+        };
+
+        const post = async (stream) => {
+          try {
+            return await fetch(url, {
+              method: 'POST',
+              headers: { ...headers, Accept: stream ? 'text/event-stream, application/json' : 'application/json' },
+              body: JSON.stringify({ ...payload, stream }),
+              signal: ctrl.signal
+            });
+          } catch (err) {
+            if (signal && signal.aborted) throw abortError();
+            if (isDirect) {
+              throw new Error(`Could not connect directly to NovelAI (${err.message}). Check your internet connection or verify your API token in Settings.`);
+            }
+            throw new Error(`Could not reach the proxy at "${rawProxy || '/proxy'}". Is "node proxy.mjs" running, and is the app opened from the proxy's address? (${err.message})`);
+          }
+        };
+
+        const simulate = async (text) => {
+          const chunks = text.match(/\s*\S+\s*/g) || (text ? [text] : []);
+          for (const c of chunks) {
+            if (signal && signal.aborted) throw abortError();
+            if (feed(c, false)) break;
+            await new Promise(r => setTimeout(r, 16));
+          }
+        };
+
+        try {
+          if (prefill) emit(prefill);
+
+          let res = null;
+          let streamed = false;
+          if (typeof onToken === 'function' && !this.streamUnsupported && !_forceNoStream) {
+            res = await post(true);
+            if (!res.ok) {
+              if ([400, 404, 405, 415, 422, 501].includes(res.status)) {
+                res = null;
+              } else {
+                throw await this.httpError(res);
+              }
+            } else if ((res.headers.get('content-type') || '').includes('text/event-stream')) {
+              const reader = res.body.getReader();
+              const decoder = new TextDecoder();
+              let buf = '';
+              let sawText = false;
+              let unknownEvents = 0;
+              readLoop: while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf('\n')) !== -1) {
+                  let line = buf.slice(0, nl);
+                  buf = buf.slice(nl + 1);
+                  if (line.endsWith('\r')) line = line.slice(0, -1);
+                  if (!line.startsWith('data:')) continue;
+                  const data = line.slice(5).trim();
+                  if (data === '[DONE]') break readLoop;
+                  let evt = null;
+                  try { evt = JSON.parse(data); } catch (e) { /* ignore */ }
+                  if (evt && evt.error) {
+                    const m = typeof evt.error === 'string' ? evt.error : (evt.error.message || JSON.stringify(evt.error));
+                    throw new Error('NovelAI stream error: ' + m);
+                  }
+                  const choice = evt && Array.isArray(evt.choices) ? evt.choices[0] : null;
+                  if (choice && typeof choice.text === 'string') {
+                    sawText = true;
+                    if (feed(choice.text, false)) break readLoop;
+                  } else if (!choice) {
+                    unknownEvents++;
+                    if (!sawText && unknownEvents >= 2) break readLoop;
+                  }
+                }
+              }
+              try { await reader.cancel(); } catch (e) { /* ignore */ }
+              ctrl.abort();
+              if (sawText || unknownEvents === 0) {
+                streamed = true;
+              } else {
+                return await this.generateRaw({ prompt, model, maxTokens, temperature, repetitionPenalty, stop, settings: { ...settings }, signal, onToken, prefill, _forceNoStream: true });
+              }
+            } else {
+              const json = await res.json().catch(() => null);
+              const text = json && json.choices && json.choices[0] && typeof json.choices[0].text === 'string' ? json.choices[0].text : null;
+              if (text === null) throw new Error('Unexpected NovelAI response format (no choices[0].text).');
+              this.streamUnsupported = true;
+              await simulate(text);
+              streamed = true;
+            }
+          }
+
+          if (!streamed) {
+            res = await post(false);
+            if (!res.ok) throw await this.httpError(res);
+            const json = await res.json().catch(() => null);
+            const text = json && json.choices && json.choices[0] && typeof json.choices[0].text === 'string' ? json.choices[0].text : null;
+            if (text === null) throw new Error('Unexpected NovelAI response format (no choices[0].text).');
+            if (typeof onToken === 'function') {
+              this.streamUnsupported = true;
+              await simulate(text);
+            } else {
+              feed(text, true);
+            }
+          }
+
+          feed('', true);
+        } catch (err) {
+          if (signal && signal.aborted) throw abortError();
+          if (err && err.name === 'AbortError') throw abortError();
+          throw err;
+        } finally {
+          if (signal) signal.removeEventListener('abort', relayAbort);
+        }
+
+        let body = gen.replace(/\s+$/, '');
+        if (prefill === '*' && body.startsWith('*')) {
+          body = body.slice(1);
+        }
+        let full = ((prefill || '') + body).trim();
+        if (this.isTruncated(full)) {
+          full = this.cleanTruncatedEnding(full);
+        }
+        return full;
       }
     };
     /* NAI-TEXT:END */
@@ -3739,6 +4048,253 @@
         }
 
         return getFallbackSuggestions();
+      },
+
+      /**
+       * Generates a lore-accurate opening roleplay scenario integrating character lore and user persona.
+       * @param {Object} params
+       * @param {Character} params.character
+       * @param {Persona} params.persona
+       * @param {string} [params.userPrompt=""] - Optional user guidance/premise
+       * @param {Settings} params.settings
+       * @param {AbortSignal} [params.signal]
+       * @param {function(string): void} [params.onToken]
+       * @returns {Promise<string>}
+       */
+      async generateOpeningScenario({ character, persona, userPrompt = '', settings, signal, onToken }) {
+        if (signal && signal.aborted) {
+          throw new DOMException('Generation aborted', 'AbortError');
+        }
+
+        const pName = String(persona?.name || 'Traveler').trim();
+        const cName = String(character?.name || 'Character').trim();
+
+        // Mock provider support
+        if (settings && settings.provider && settings.provider.type === 'mock') {
+          const userIdea = (userPrompt || '').trim();
+          const mockScenario = userIdea
+            ? `*The quiet afternoon shifts as ${cName} turns to ${pName}, taking note of the unfolding situation regarding "${userIdea.slice(0, 55)}".* "Well now," *${cName} remarks with an intrigued tilt of the head,* "this is certainly not how I expected our day to begin. Shall we see where it leads?"`
+            : `*A sudden breeze sweeps across the path outside the settlement, kicking up dust and leaves around ${cName} and ${pName}. ${cName} pauses, adjusting their gear and looking over with a measured expression.* "Right on time, ${pName}." *A faint, knowing smile appears.* "I was just wondering how long it would take before our paths crossed today. Are you ready for what comes next?"`;
+          if (typeof onToken === 'function') {
+            const chunks = mockScenario.match(/\s*\S+\s*/g) || [mockScenario];
+            for (const c of chunks) {
+              if (signal && signal.aborted) throw new DOMException('Generation aborted', 'AbortError');
+              onToken(c);
+              await new Promise(r => setTimeout(r, 20));
+            }
+          }
+          return mockScenario;
+        }
+
+        // Build prompt for NovelAI
+        const fill = (s) => NovelAIText.fillNames(s, cName, pName).trim();
+        const charTagline = fill(character.tagline || '');
+        const charTags = Array.isArray(character.tags) ? character.tags.join(', ') : '';
+        const charDef = fill(character.description || '');
+        const charGreeting = fill(character.greeting || '');
+        const personaDesc = fill(persona?.description || '');
+
+        const enabledLore = (character.lorebook || [])
+          .filter(e => e && e.enabled && String(e.text || '').trim())
+          .map(e => fill(e.text));
+        const loreBlock = enabledLore.length ? `\n[World Lore]\n${enabledLore.join('\n')}\n` : '';
+
+        // Language detection: Spanish check
+        const checkEs = (txt) => /[áéíóúüñ¿¡]/i.test(txt || '') || /\b(?:hola|qué|cómo|estás|por qué|gracias|bueno|bien|vamos|está|tregua|señor|dime|acuerdo|entendido|claro|espera)\b/i.test(txt || '');
+        const isSpanish = (userPrompt && userPrompt.trim())
+          ? checkEs(userPrompt)
+          : (checkEs(character.description) || checkEs(character.greeting));
+
+        const scenarioDirection = (userPrompt && userPrompt.trim())
+          ? `User's desired scenario premise (adapt this faithfully within ${cName}'s lore): ${userPrompt.trim()}`
+          : `Invent a creative, lore-accurate situation or encounter that fits ${cName}'s world and personality, different from the standard greeting above.`;
+
+        const langRule = isSpanish ? '\n6. LANGUAGE: Write the entire opening scene in natural, atmospheric Spanish.' : '';
+
+        const prompt = [
+          `You are an expert roleplay storyteller. Write a fresh, immersive opening scene to start a new roleplay session between ${cName} and ${pName}.`,
+          '',
+          'CRITICAL RULES:',
+          `1. LORE & SETTING FIDELITY: Strictly respect ${cName}'s canonical universe, time period, tone, and lore based on the Character Profile below. Never place them in an incompatible genre or setting.`,
+          `2. BOTH CHARACTERS: Naturally integrate ${pName} (using their Persona profile) into the scene with ${cName}, establishing why and where they are interacting.`,
+          `3. FORMAT: Write in third-person roleplay format from ${cName}'s perspective. Put physical actions and sensory descriptions in *asterisks* and spoken dialogue in "double quotes".`,
+          `4. BOUNDARIES: Do NOT speak, act, or decide thoughts for ${pName}. End the scene with an open hook or dialogue line that invites ${pName} to respond.`,
+          `5. LENGTH: 1 to 3 rich paragraphs. Do NOT prefix the output with "${cName}:".${langRule}`,
+          '',
+          `[Character Profile: ${cName}]`,
+          charTagline ? `Tagline: ${charTagline}` : '',
+          charTags ? `Tags: ${charTags}` : '',
+          charDef ? `Definition: ${charDef}` : '',
+          charGreeting ? `Voice Reference (Standard Greeting): ${charGreeting}` : '',
+          loreBlock,
+          `[User Persona: ${pName}]`,
+          personaDesc ? `Description: ${personaDesc}` : `Name: ${pName}`,
+          '',
+          '[Scenario Direction]',
+          scenarioDirection,
+          '',
+          'Opening Scene:',
+          '*'
+        ].filter(Boolean).join('\n');
+
+        const model = settings?.provider?.model === 'glm-4-6' ? 'glm-4-6' : 'xialong-v1';
+
+        const stops = [
+          `\n${pName}:`,
+          `\n${cName}:`,
+          '\nUser:',
+          '\nUSER:',
+          '\n---',
+          '\n[Character Profile:'
+        ];
+
+        return await NovelAIText.generateRaw({
+          prompt,
+          model,
+          maxTokens: 340,
+          temperature: 1.1,
+          repetitionPenalty: 1.04,
+          stop: stops,
+          settings,
+          signal,
+          onToken,
+          prefill: '*'
+        });
+      },
+
+      /**
+       * Generates all character fields from a raw free-form concept using structured block generation.
+       * @param {Object} params
+       * @param {string} params.concept - User's free-text concept
+       * @param {Settings} params.settings
+       * @param {AbortSignal} [params.signal]
+       * @returns {Promise<{name: string, tagline: string, greeting: string, description: string, exampleDialogue: string, tags: string[]}>}
+       */
+      async generateCharacterProfile({ concept, settings, signal }) {
+        if (signal && signal.aborted) {
+          throw new DOMException('Generation aborted', 'AbortError');
+        }
+
+        const isSpanish = /[áéíóúüñ¿¡]/i.test(concept || '') || /\b(?:una|un|bruja|mago|chica|chico|pantano|rey|princesa|guerrero|asesino|tabernero|espada|magia|pociones|robot|detective)\b/i.test(concept || '');
+
+        // Mock provider support
+        if (settings && settings.provider && settings.provider.type === 'mock') {
+          await new Promise(r => setTimeout(r, 600));
+          return {
+            name: isSpanish ? 'Mireia del Pantano' : 'Rowena Vale',
+            tagline: isSpanish ? 'Una boticaria reservada que destila remedios prohibidos en los confines del cenagal.' : 'A reclusive herbalist brewing forbidden concoctions in the deep wetlands.',
+            tags: ['Fantasy', 'Mystery', 'Helper'],
+            greeting: isSpanish
+              ? `*El humo verde de un caldero gorgotea suavemente mientras Mireia te observa desde detrás del mostrador con una ceja arqueada.* "¿Quién te ha dicho que puedes entrar sin llamar? Di lo que buscas rápido antes de que cierre la tienda."`
+              : `*Acrid vapor curls from a simmering copper kettle as Rowena glances up from her worktable, eyes narrowing with guarded curiosity.* "The swamp doesn't yield friendly visitors often. State your business before I decide to lock the gate."`,
+            description: `[Character("${isSpanish ? 'Mireia del Pantano' : 'Rowena Vale'}")\n{\n  Age("25")\n  Role("Swamp Herbalist & Apothecary")\n  Appearance("Slender build, disheveled dark hair tucked beneath a faded hood, expressive amber eyes, wearing a potion-stained leather apron over rustic traveling clothes.")\n  Personality("Pragmatic, sharp-tongued, fiercely independent, but secretly loyal to those who earn her trust.")\n  SpeechStyle("Brisk, concise, dry humor with a faint guarded edge.")\n  Backstory("Exiled from the capital's academy for pursuing unorthodox alchemy, she established an off-grid sanctuary deep in the marsh.")\n  Goals("Perfecting rare elixirs and protecting her secluded grove from encroaching mercenaries.")\n}]`,
+            exampleDialogue: `{{user}}: "Do you have anything for a burn?"\n{{char}}: *Reaches beneath the counter without looking and slides a cool ceramic jar forward.* "Two silver pieces. And stop handling wild embers with bare hands."`
+          };
+        }
+
+        const namingRule = 'NAMING RULE: If the user did not specify a name, invent a culturally grounded, phonetic, memorable name that fits the character\'s background. STRICTLY FORBIDDEN names: Elara, Silas, Elias, Kira, Lyra, Kael, Aria, Nova, Luna, Marcus, Eleanor, Elena, Thorne, Grimbold, Amara, Anya, Alara, Kaela, Lyrien, Zephyr, and surnames like Voss, Chen, Blackwood, Ashwood, Ravenwood, Shadowblade, Stormweaver.';
+
+        const langRule = isSpanish
+          ? 'LANGUAGE RULE: The concept is in Spanish. You MUST write the tagline, greeting, description, and dialogue in Spanish. Category tags should be in standard English.'
+          : 'LANGUAGE RULE: Write the fields in the same language as the user concept.';
+
+        const prompt = [
+          'You are an expert character architect for an interactive roleplay visual novel.',
+          'Your task is to take a raw character concept and turn it into a complete, rich character profile.',
+          '',
+          'USER CONCEPT:',
+          concept.trim(),
+          '',
+          namingRule,
+          '',
+          langRule,
+          '',
+          'CATEGORIES: Choose relevant tags from: Sci-Fi, Fantasy, Mystery, Historical, Drama, Adventure, Comedy, Slice of Life, Helper, Original, plus 1-2 specific archetype tags.',
+          '',
+          'FORMAT: Output strictly the following delimited blocks without extra introductory or concluding commentary:',
+          '',
+          '===NAME===',
+          '<Character Name (1-3 words)>',
+          '===TAGLINE===',
+          '<One-sentence hook or character quote>',
+          '===TAGS===',
+          '<Comma-separated tags, e.g. Fantasy, Mystery, Helper>',
+          '===GREETING===',
+          '<Rich opening greeting with *actions in asterisks* and "spoken dialogue in quotes", 1-2 paragraphs, ending with an open hook for {{user}}>',
+          '===DESCRIPTION===',
+          '[Character("<Character Name>")',
+          '{',
+          '  Age("<Age>")',
+          '  Role("<Role/Occupation>")',
+          '  Appearance("<2-3 evocative sentences: physical appearance, hair, eyes, build, clothing, accessories>")',
+          '  Personality("<2-3 evocative sentences: traits, flaws, quirks, demeanor>")',
+          '  SpeechStyle("<1-2 sentences: cadence, tone, mannerisms>")',
+          '  Backstory("<2-3 sentences: origin, lore, how they ended up here>")',
+          '  Goals("<1-2 sentences: what drives them in the roleplay>")',
+          '}]',
+          '===DIALOGUE===',
+          '{{user}}: "<Example user line>"',
+          '{{char}}: *<Action>* "<Characteristic reply>"',
+          '===END==='
+        ].join('\n');
+
+        const rawText = await NovelAIText.generateRaw({
+          prompt,
+          model: 'glm-4-6',
+          maxTokens: 900,
+          temperature: 0.7,
+          repetitionPenalty: 1.04,
+          stop: ['===END===', '\n===END'],
+          settings,
+          signal
+        });
+
+        // Robust Block Parser
+        const extractBlock = (marker, nextMarkers) => {
+          const nextPattern = nextMarkers.map(m => `===${m}===`).join('|');
+          const rx = new RegExp(`===${marker}===\\s*([\\s\\S]*?)(?=(?:${nextPattern}|$))`, 'i');
+          const m = rawText.match(rx);
+          return m ? m[1].trim() : '';
+        };
+
+        let name = extractBlock('NAME', ['TAGLINE', 'TAGS', 'GREETING']).replace(/^["'`*]|["'`*]$/g, '').trim();
+        let tagline = extractBlock('TAGLINE', ['TAGS', 'GREETING', 'DESCRIPTION']).replace(/^["']|["']$/g, '').trim();
+        let tagsRaw = extractBlock('TAGS', ['GREETING', 'DESCRIPTION']);
+        let greeting = extractBlock('GREETING', ['DESCRIPTION', 'DIALOGUE']).trim();
+        let description = extractBlock('DESCRIPTION', ['DIALOGUE', 'END']).trim();
+        let exampleDialogue = extractBlock('DIALOGUE', ['END']).trim();
+
+        // If tags were placed under tagline by mistake
+        if (!tagsRaw && /^(?:Sci-Fi|Fantasy|Mystery|Historical|Drama|Adventure|Comedy|Slice of Life|Helper|Original)(?:\s*,\s*[\w\s-]+)+$/i.test(tagline)) {
+          tagsRaw = tagline;
+          tagline = '';
+        }
+
+        // Fallbacks and cleanups
+        if (!name) name = isSpanish ? 'Nuevo Personaje' : 'New Character';
+        if (!tagline) tagline = isSpanish ? 'Un personaje envuelto en misterio.' : 'A character shrouded in mystery.';
+        if (!greeting) greeting = `*${name} glances over.* "Welcome."`;
+        if (!description) {
+          description = `[Character("${name}")\n{\n  Age("Unknown")\n  Role("Traveler")\n  Appearance("Grounded presence.")\n  Personality("Reserved.")\n  SpeechStyle("Measured.")\n  Backstory("Origin unknown.")\n  Goals("Seeking new paths.")\n}]`;
+        } else if (!description.includes('[Character(')) {
+          description = `[Character("${name}")\n{\n  ${description}\n}]`;
+        }
+
+        let tags = tagsRaw
+          ? tagsRaw.split(/[,;\n]+/).map(t => t.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
+          : [];
+        if (tags.length === 0) {
+          tags = ['Original', 'Roleplay'];
+        }
+
+        return {
+          name,
+          tagline,
+          tags,
+          greeting,
+          description,
+          exampleDialogue
+        };
       }
     };
 
@@ -4023,7 +4579,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           topP: 0.938,
           topK: 60,
           minP: 0.024,
-          maxTokens: 220,
+          maxTokens: 340,
           repetitionPenalty: 1.04,
           stopSequences: ['\n{{user}}:', '\nUser:'],
           systemPromptOverride: ''
@@ -4317,7 +4873,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       Storage.saveChats(chats);
     }
 
-    function createNewChatForCharacter(character) {
+    function createNewChatForCharacter(character, customGreeting = null) {
       const chat = {
         id: 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
         characterId: character.id,
@@ -4329,7 +4885,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             selectedIndex: 0,
             alternatives: [
               {
-                text: character.greeting || `*${character.name} nods in greeting.* "Hello."`,
+                text: customGreeting !== null ? customGreeting : (character.greeting || `*${character.name} nods in greeting.* "Hello."`),
                 createdAt: Date.now()
               }
             ]
@@ -4900,6 +5456,116 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       root.querySelector('#modal-confirm-btn').addEventListener('click', () => {
         root.innerHTML = '';
         if (onConfirm) onConfirm();
+      });
+    }
+
+    function showNewChatModal(char) {
+      const root = document.getElementById('modal-root');
+      const persona = getActivePersona();
+      let selectedMode = 'standard'; // 'standard' | 'dynamic'
+
+      root.innerHTML = `
+        <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div class="modal-card">
+            <div class="modal-header">
+              <span id="modal-title">Start Roleplay with ${escapeHtml(char.name)}</span>
+              <button class="icon-btn" data-action="close-modal" aria-label="Close modal">${Icons.close}</button>
+            </div>
+            <div class="modal-body">
+              <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:1rem; padding:0.55rem 0.8rem; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.85rem;">
+                <span style="color:var(--text-muted); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:600;">Active Persona:</span>
+                <strong style="color:var(--text-primary);">${escapeHtml(persona.name)}</strong>
+                <span style="font-size:0.78rem; color:var(--text-secondary); margin-left:auto; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${escapeHtml(persona.description || '')}</span>
+              </div>
+
+              <!-- Option A: Standard Greeting -->
+              <div class="start-option-card active" id="modal-opt-standard" style="padding:0.85rem 1rem; border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--bg-elevated); cursor:pointer; margin-bottom:0.75rem; transition:border-color 0.15s, background-color 0.15s;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.35rem;">
+                  <strong style="font-size:0.95rem; color:var(--text-primary);">Standard Greeting</strong>
+                  <span class="badge" style="font-size:0.72rem;">Predefined</span>
+                </div>
+                <p style="font-size:0.82rem; font-style:italic; color:var(--text-secondary); margin:0; line-height:1.45; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;">
+                  ${escapeHtml(char.greeting || `*${char.name} nods in greeting.* "Hello."`)}
+                </p>
+              </div>
+
+              <!-- Option B: Dynamic Scenario -->
+              <div class="start-option-card" id="modal-opt-dynamic" style="padding:0.85rem 1rem; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-surface); cursor:pointer; transition:border-color 0.15s, background-color 0.15s;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.35rem;">
+                  <strong style="font-size:0.95rem; color:var(--text-primary); display:flex; align-items:center; gap:0.4rem;">
+                    <span>🎲</span> Lore-Accurate AI Scenario
+                  </strong>
+                  <span class="badge" style="font-size:0.72rem; border-color:var(--accent); color:var(--accent);">NovelAI</span>
+                </div>
+                <p style="font-size:0.82rem; color:var(--text-secondary); margin:0 0 0.5rem 0; line-height:1.45;">
+                  The AI crafts a fresh, immersive scenario respecting ${escapeHtml(char.name)}'s universe and your active persona (${escapeHtml(persona.name)}).
+                </p>
+                <div id="modal-dynamic-prompt-wrap" style="display:none; margin-top:0.65rem;">
+                  <label for="custom-scenario-prompt" class="form-label" style="font-size:0.8rem; margin-bottom:0.3rem;">Scenario Premise (Optional)</label>
+                  <textarea id="custom-scenario-prompt" class="textarea-field" style="min-height:56px; font-size:0.85rem;" placeholder="e.g. Taking shelter from a storm in a roadside tavern... (Leave blank for a lore-accurate surprise)"></textarea>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" data-action="close-modal">Cancel</button>
+              <button class="btn btn-primary" id="modal-start-chat-btn">${Icons.sparkles} <span>Begin Story</span></button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const optStandard = root.querySelector('#modal-opt-standard');
+      const optDynamic = root.querySelector('#modal-opt-dynamic');
+      const promptWrap = root.querySelector('#modal-dynamic-prompt-wrap');
+      const promptInput = root.querySelector('#custom-scenario-prompt');
+
+      const setMode = (mode) => {
+        selectedMode = mode;
+        if (mode === 'standard') {
+          optStandard.style.borderColor = 'var(--accent)';
+          optStandard.style.backgroundColor = 'var(--bg-elevated)';
+          optDynamic.style.borderColor = 'var(--border)';
+          optDynamic.style.backgroundColor = 'var(--bg-surface)';
+          promptWrap.style.display = 'none';
+        } else {
+          optDynamic.style.borderColor = 'var(--accent)';
+          optDynamic.style.backgroundColor = 'var(--bg-elevated)';
+          optStandard.style.borderColor = 'var(--border)';
+          optStandard.style.backgroundColor = 'var(--bg-surface)';
+          promptWrap.style.display = 'block';
+          if (promptInput) promptInput.focus();
+        }
+      };
+
+      optStandard.addEventListener('click', () => setMode('standard'));
+      optDynamic.addEventListener('click', (e) => {
+        if (e.target === promptInput) return;
+        setMode('dynamic');
+      });
+
+      root.querySelectorAll('[data-action="close-modal"]').forEach(b => {
+        b.addEventListener('click', () => { root.innerHTML = ''; });
+      });
+
+      root.querySelector('#modal-start-chat-btn').addEventListener('click', async () => {
+        const userPrompt = promptInput ? promptInput.value.trim() : '';
+        root.innerHTML = '';
+
+        if (selectedMode === 'standard') {
+          const chat = createNewChatForCharacter(char);
+          State.activeCharacterId = char.id;
+          State.activeChatId = chat.id;
+          State.chatMenuOpen = false;
+          State.screen = 'chat';
+          State.visibleMessageLimit = 40;
+          State.preserveScrollPosition = false;
+          State.isLoadingOlder = false;
+          State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
+          renderMainView();
+        } else {
+          const chat = createNewChatForCharacter(char, '');
+          triggerOpeningScenarioGeneration({ chat, char, userPrompt });
+        }
       });
     }
 
@@ -5629,6 +6295,31 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   <span><strong>Default Character Template:</strong> Modifying and saving will store this as your own custom local copy, preserving the original default character.</span>
                 </div>
               ` : ''}
+
+              <!-- Panel de Generación con IA -->
+              <div class="profile-card" style="margin-bottom: 1.25rem; border-color: var(--accent); background-color: var(--bg-surface);">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.4rem;">
+                  <div style="font-family:var(--font-serif); font-weight:700; font-size:1.05rem; display:flex; align-items:center; gap:0.5rem; color:var(--accent);">
+                    ${Icons.sparkles} <span>AI Character Architect</span>
+                  </div>
+                  <span class="badge" style="border-color:var(--accent); color:var(--accent);">Auto-Fill</span>
+                </div>
+                <p class="form-hint" style="margin-top:0; margin-bottom:0.75rem;">
+                  Describe your character idea (e.g., "a tsundere swamp witch who runs an illegal potion apothecary") and let the AI fill out the profile fields below.
+                </p>
+                <div style="display:flex; gap:0.65rem; align-items:flex-start; flex-wrap:wrap;">
+                  <textarea id="ed-ai-concept" class="textarea-field" style="flex:1; min-width:240px; min-height:64px;" placeholder="Describe archetype, personality, setting, or specific traits..."></textarea>
+                  <div style="display:flex; flex-direction:column; gap:0.4rem;">
+                    <button type="button" class="btn btn-primary" id="ed-ai-generate-btn">
+                      ${Icons.sparkles} <span>Generate Fields</span>
+                    </button>
+                    <label class="switch-label" style="min-height:28px; font-size:0.78rem; color:var(--text-secondary); cursor:pointer;">
+                      <input type="checkbox" id="ed-ai-also-avatar" class="switch-input" checked>
+                      <span>Also generate avatar</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
               <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
                 <img id="editor-avatar-preview" src="${ImageStore.resolveUrl(draft.avatar)}" alt="Avatar preview" style="width:88px;height:88px;border-radius:18px;object-fit:cover;border:2px solid var(--border);">
                 <div style="display:flex; flex-direction:column; gap:0.5rem;">
@@ -6237,6 +6928,114 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       }
     }
 
+    async function triggerOpeningScenarioGeneration({ chat, char, userPrompt = '' }) {
+      if (State.isGenerating) return;
+      State.isGenerating = true;
+      State.abortController = new AbortController();
+
+      if (userPrompt) {
+        chat.memory = (chat.memory ? chat.memory + '\n' : '') + `Scenario Premise: ${userPrompt}`;
+        updateChatInStorage(chat);
+      }
+
+      State.activeCharacterId = char.id;
+      State.activeChatId = chat.id;
+      State.chatMenuOpen = false;
+      State.screen = 'chat';
+      State.visibleMessageLimit = 40;
+      State.preserveScrollPosition = false;
+      State.isLoadingOlder = false;
+
+      await renderMainView();
+
+      const persona = getActivePersona();
+      const settings = Storage.getSettings();
+      const msgObj = chat.messages[0];
+      const altIdx = 0;
+      let updatePending = false;
+      let rafId = null;
+
+      const updateMoodBadgeDom = (emotion) => {
+        const senderLine = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-sender-line`);
+        if (senderLine) {
+          let badge = senderLine.querySelector('.msg-mood-badge');
+          if (emotion) {
+            if (!badge) {
+              badge = document.createElement('span');
+              badge.className = 'msg-mood-badge';
+              senderLine.appendChild(badge);
+            }
+            badge.title = `Character Mood: ${emotion}`;
+            badge.innerHTML = `<span class="msg-mood-dot"></span><span>${escapeHtml(emotion)}</span>`;
+          } else if (badge) {
+            badge.remove();
+          }
+        }
+      };
+
+      const scheduleDomUpdate = () => {
+        if (updatePending) return;
+        updatePending = true;
+        rafId = requestAnimationFrame(() => {
+          updatePending = false;
+          const currentText = msgObj.alternatives[altIdx].text;
+          const { cleanText, emotion } = extractMessageEmotion(currentText);
+          const row = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-text-body`);
+          if (row) {
+            row.innerHTML = formatStreamingText(cleanText);
+            scrollToChatBottom();
+          }
+          updateMoodBadgeDom(emotion);
+        });
+      };
+
+      try {
+        const finalScenario = await API.generateOpeningScenario({
+          character: char,
+          persona,
+          userPrompt,
+          settings,
+          signal: State.abortController.signal,
+          onToken(chunk) {
+            msgObj.alternatives[altIdx].text += chunk;
+            scheduleDomUpdate();
+          }
+        });
+
+        if (rafId) cancelAnimationFrame(rafId);
+        msgObj.alternatives[altIdx].text = finalScenario;
+        const { cleanText: finalClean, emotion: finalEmotion } = extractMessageEmotion(finalScenario);
+        const row = document.querySelector(`.msg-row[data-msg-id="${msgObj.id}"] .msg-text-body`);
+        if (row) {
+          row.innerHTML = formatRoleplayText(finalClean);
+          scrollToChatBottom();
+        }
+        updateMoodBadgeDom(finalEmotion);
+        updateChatInStorage(chat);
+
+        if (settings.showSuggestions) {
+          State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
+        }
+      } catch (err) {
+        if (rafId) cancelAnimationFrame(rafId);
+        if (err.name === 'AbortError') {
+          if (!msgObj.alternatives[altIdx].text) {
+            msgObj.alternatives[altIdx].text = '*[Generation stopped by user]*';
+          }
+          updateChatInStorage(chat);
+        } else {
+          showToast('Scenario generation failed: ' + (err.message || 'Unknown error'), 'error', () => {
+            triggerOpeningScenarioGeneration({ chat, char, userPrompt });
+          });
+        }
+      } finally {
+        if (rafId) cancelAnimationFrame(rafId);
+        State.isGenerating = false;
+        State.abortController = null;
+        await renderMainView();
+      }
+    }
+
     async function handleSendUserMessage(prefilledText = null) {
       if (State.isGenerating) return;
       const chat = getActiveChat();
@@ -6509,6 +7308,83 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         }
       });
 
+      const aiGenBtn = document.getElementById('ed-ai-generate-btn');
+      const aiConceptIn = document.getElementById('ed-ai-concept');
+      const aiAlsoAvatar = document.getElementById('ed-ai-also-avatar');
+
+      if (aiGenBtn && aiConceptIn) {
+        aiGenBtn.addEventListener('click', async () => {
+          const concept = aiConceptIn.value.trim();
+          if (!concept) {
+            showToast('Please write a brief concept first.', 'warning');
+            aiConceptIn.focus();
+            return;
+          }
+
+          const hasManualContent = nameIn.value.trim() || document.getElementById('ed-description').value.trim() || document.getElementById('ed-greeting').value.trim();
+          const executeGeneration = async () => {
+            aiGenBtn.disabled = true;
+            const origHtml = aiGenBtn.innerHTML;
+            aiGenBtn.innerHTML = `<span class="spin">${Icons.sparkles}</span> <span>Synthesizing Profile...</span>`;
+
+            try {
+              const res = await API.generateCharacterProfile({ concept, settings: Storage.getSettings() });
+              if (res) {
+                if (res.name) nameIn.value = res.name;
+                if (res.tagline) tagIn.value = res.tagline;
+                if (res.greeting) document.getElementById('ed-greeting').value = res.greeting;
+                if (res.description) document.getElementById('ed-description').value = res.description;
+                if (res.exampleDialogue) document.getElementById('ed-dialogue').value = res.exampleDialogue;
+                if (Array.isArray(res.tags) && res.tags.length > 0) tagsIn.value = res.tags.join(', ');
+
+                syncPreview();
+
+                if (aiAlsoAvatar && aiAlsoAvatar.checked) {
+                  aiGenBtn.innerHTML = `<span class="spin">${Icons.sparkles}</span> <span>Synthesizing Avatar...</span>`;
+                  try {
+                    const uri = await API.generateAvatar({
+                      character: {
+                        name: res.name || nameIn.value,
+                        tagline: res.tagline || tagIn.value,
+                        description: res.description || document.getElementById('ed-description').value
+                      }
+                    });
+                    if (uri) {
+                      draft.avatar = uri;
+                      avatarPreview.src = ImageStore.resolveUrl(uri);
+                      cardAvatar.src = ImageStore.resolveUrl(uri);
+                    }
+                  } catch (avatarErr) {
+                    console.warn('[AI Character Architect] Avatar generation failed:', avatarErr);
+                    showToast('Character profile generated, but avatar generation failed: ' + (avatarErr.message || 'Unknown error'), 'warning');
+                  }
+                }
+
+                showToast('Character profile generated! Review and click Save.', 'success');
+              }
+            } catch (err) {
+              console.error('[AI Character Architect] Generation failed:', err);
+              showToast('Failed to generate character: ' + (err.message || 'Unknown error'), 'error');
+            } finally {
+              aiGenBtn.disabled = false;
+              aiGenBtn.innerHTML = origHtml;
+            }
+          };
+
+          if (hasManualContent) {
+            showConfirmDialog({
+              title: 'Overwrite Fields?',
+              message: 'Generating will overwrite the current fields in the editor. Are you sure you want to proceed?',
+              confirmLabel: 'Overwrite & Generate',
+              danger: false,
+              onConfirm: executeGeneration
+            });
+          } else {
+            executeGeneration();
+          }
+        });
+      }
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const saved = await API.saveCharacter({
@@ -6596,6 +7472,21 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           saveAll();
           const main = document.getElementById('main-view');
           if (main && State.screen === 'settings') renderSettingsScreen(main);
+        });
+      }
+
+      const setLengthEl = document.getElementById('set-length');
+      if (setLengthEl) {
+        setLengthEl.addEventListener('change', () => {
+          const tokensInput = document.getElementById('adv-tokens');
+          const currentVal = parseInt(tokensInput?.value, 10);
+          if (tokensInput && (currentVal === 200 || currentVal === 220 || currentVal === 340 || currentVal === 480)) {
+            const nextVal = setLengthEl.value === 'short' ? 200 : (setLengthEl.value === 'long' ? 480 : 340);
+            tokensInput.value = nextVal;
+            const valEl = document.getElementById('val-tokens');
+            if (valEl) valEl.textContent = nextVal;
+          }
+          saveAll();
         });
       }
     }
@@ -6688,15 +7579,19 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           const existingChats = Storage.getChats().filter(c => c.characterId === charId).sort((a, b) => b.updatedAt - a.updatedAt);
           const char = await API.getCharacter(charId);
           if (!char) return;
-          const chat = existingChats[0] || createNewChatForCharacter(char);
-          State.activeCharacterId = char.id;
-          State.activeChatId = chat.id;
-          State.screen = 'chat';
-          State.visibleMessageLimit = 40;
-          State.preserveScrollPosition = false;
-          State.isLoadingOlder = false;
-          State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
-          renderMainView();
+          if (existingChats.length > 0) {
+            const chat = existingChats[0];
+            State.activeCharacterId = char.id;
+            State.activeChatId = chat.id;
+            State.screen = 'chat';
+            State.visibleMessageLimit = 40;
+            State.preserveScrollPosition = false;
+            State.isLoadingOlder = false;
+            State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
+            renderMainView();
+          } else {
+            showNewChatModal(char);
+          }
           break;
         }
 
@@ -6704,16 +7599,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           const charId = btn.getAttribute('data-char-id');
           const char = await API.getCharacter(charId);
           if (!char) return;
-          const chat = createNewChatForCharacter(char);
-          State.activeCharacterId = char.id;
-          State.activeChatId = chat.id;
-          State.chatMenuOpen = false;
-          State.screen = 'chat';
-          State.visibleMessageLimit = 40;
-          State.preserveScrollPosition = false;
-          State.isLoadingOlder = false;
-          State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
-          renderMainView();
+          showNewChatModal(char);
           break;
         }
 
