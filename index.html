@@ -1092,6 +1092,50 @@
       position: relative;
     }
 
+    .chat-persona-chip {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      min-height: 36px;
+      padding: 0.2rem 0.45rem;
+      background-color: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      max-width: 185px;
+      min-width: 0;
+    }
+
+    .chat-persona-chip:focus-within {
+      border-color: var(--accent);
+    }
+
+    .chat-persona-chip img {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+
+    .chat-persona-select {
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 0.82rem;
+      font-weight: 600;
+      min-width: 0;
+      max-width: 135px;
+      cursor: pointer;
+      outline: none;
+      text-overflow: ellipsis;
+    }
+
+    .chat-persona-select option {
+      background-color: var(--bg-elevated);
+      color: var(--text-primary);
+    }
+
     /* Dropdown Menu */
     .dropdown-menu {
       position: absolute;
@@ -1934,6 +1978,20 @@
         display: none;
       }
 
+      .chat-persona-chip {
+        max-width: 130px;
+        padding: 0.15rem 0.35rem;
+      }
+
+      .chat-persona-chip img {
+        display: none;
+      }
+
+      .chat-persona-select {
+        max-width: 112px;
+        font-size: 0.76rem;
+      }
+
       #toast-container {
         bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
         left: 1rem;
@@ -2005,6 +2063,7 @@
      * @typedef {Object} Chat
      * @property {string} id - Unique identifier
      * @property {string} characterId - Associated character ID
+     * @property {string} [personaId] - Per-chat Persona ID (falls back to global active persona if omitted)
      * @property {string} title - Chat session name
      * @property {Message[]} messages - Ordered message history
      * @property {string} memory - Per-chat NovelAI-style Memory text
@@ -3101,6 +3160,258 @@
           return new Blob([u8arr], { type: mime });
         } catch {
           return null;
+        }
+      }
+    };
+
+    /**
+     * ============================================================================
+     * INDEXEDDB CHAT STORE (Unlimited Chat History Storage for Large Imports)
+     * ============================================================================
+     */
+    const ChatStore = {
+      _db: null,
+      _chats: [],
+      _initialized: false,
+      _initPromise: null,
+      _dbUnavailable: false,
+      _writeChain: Promise.resolve(),
+
+      _readLocalStorageChats() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEYS.CHATS);
+          if (!raw) return [];
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      },
+
+      _saveLocalStorageChats(chats) {
+        try {
+          localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(chats));
+        } catch (e) {
+          console.error('[Storage] Failed to save chats to localStorage:', e);
+          if (e.name === 'QuotaExceededError' || e.code === 22) {
+            try {
+              const safeChats = JSON.parse(JSON.stringify(chats));
+              safeChats.forEach(c => c.messages?.forEach(m => m.alternatives?.forEach(a => {
+                if (a.imageUrl && a.imageUrl.startsWith('data:image/')) {
+                  a.imageUrl = '';
+                }
+              })));
+              localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(safeChats));
+            } catch (err2) {
+              console.error('[Storage] Emergency chat save failed:', err2);
+            }
+          }
+        }
+      },
+
+      _openDb() {
+        return new Promise((resolve) => {
+          if (!window.indexedDB) {
+            console.warn('[ChatStore] IndexedDB not available, using localStorage fallback.');
+            this._dbUnavailable = true;
+            return resolve(null);
+          }
+          try {
+            const req = indexedDB.open('aetherweaver_chats_v1', 1);
+            req.onupgradeneeded = (e) => {
+              const db = e.target.result;
+              if (!db.objectStoreNames.contains('chats')) {
+                db.createObjectStore('chats', { keyPath: 'id' });
+              }
+            };
+            req.onsuccess = (e) => resolve(e.target.result);
+            req.onerror = () => {
+              console.warn('[ChatStore] IndexedDB failed to open, using localStorage fallback.');
+              this._dbUnavailable = true;
+              resolve(null);
+            };
+          } catch (e) {
+            console.warn('[ChatStore] Error opening IndexedDB:', e);
+            this._dbUnavailable = true;
+            resolve(null);
+          }
+        });
+      },
+
+      _loadAllFromDb(db) {
+        return new Promise((resolve) => {
+          try {
+            const tx = db.transaction('chats', 'readonly');
+            const req = tx.objectStore('chats').getAll();
+            req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+            req.onerror = () => resolve([]);
+          } catch {
+            resolve([]);
+          }
+        });
+      },
+
+      _syncChatsToDb(db, chats) {
+        return new Promise((resolve, reject) => {
+          try {
+            const tx = db.transaction('chats', 'readwrite');
+            const store = tx.objectStore('chats');
+            const validChats = (chats || []).filter(c => c && typeof c === 'object' && c.id);
+            const targetIds = new Set(validChats.map(c => c.id));
+
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+            tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+
+            const keysReq = store.getAllKeys();
+            keysReq.onsuccess = () => {
+              const existingKeys = keysReq.result || [];
+              for (const k of existingKeys) {
+                if (!targetIds.has(k)) {
+                  store.delete(k);
+                }
+              }
+              for (const chat of validChats) {
+                store.put(chat);
+              }
+            };
+            keysReq.onerror = () => reject(keysReq.error);
+          } catch (e) {
+            reject(e);
+          }
+        });
+      },
+
+      async init() {
+        if (this._initPromise) return this._initPromise;
+        this._initPromise = (async () => {
+          const db = await this._openDb();
+          this._db = db;
+
+          if (!db) {
+            if (!this._initialized) {
+              this._chats = this._readLocalStorageChats();
+              this._initialized = true;
+            }
+            return;
+          }
+
+          const dbChats = await this._loadAllFromDb(db);
+          const legacyChats = this._readLocalStorageChats();
+          let hasLegacyKey = false;
+          try {
+            hasLegacyKey = localStorage.getItem(STORAGE_KEYS.CHATS) !== null;
+          } catch { }
+
+          const byId = new Map();
+          for (const c of dbChats) {
+            if (c && c.id) byId.set(c.id, c);
+          }
+
+          let needsDbSync = false;
+          for (const lc of legacyChats) {
+            if (!lc || !lc.id) continue;
+            const existing = byId.get(lc.id);
+            if (!existing || (lc.updatedAt || 0) > (existing.updatedAt || 0)) {
+              byId.set(lc.id, lc);
+              needsDbSync = true;
+            }
+          }
+
+          // Preserve any in-memory chats written prior to DB opening (e.g. immediately after resetToDemo)
+          for (const mc of this._chats) {
+            if (!mc || !mc.id) continue;
+            const existing = byId.get(mc.id);
+            if (!existing || (mc.updatedAt || 0) >= (existing.updatedAt || 0)) {
+              byId.set(mc.id, mc);
+              needsDbSync = true;
+            }
+          }
+
+          const merged = Array.from(byId.values());
+          if (needsDbSync) {
+            try {
+              await this._syncChatsToDb(db, merged);
+              if (hasLegacyKey) {
+                localStorage.removeItem(STORAGE_KEYS.CHATS);
+              }
+              if (legacyChats.length > 0) {
+                console.log(`[ChatStore] Migrated ${legacyChats.length} chat(s) from localStorage to IndexedDB.`);
+              }
+            } catch (e) {
+              console.warn('[ChatStore] Failed to migrate legacy chats to IndexedDB:', e);
+            }
+          } else if (hasLegacyKey) {
+            try {
+              localStorage.removeItem(STORAGE_KEYS.CHATS);
+            } catch { }
+          }
+
+          this._chats = merged;
+          this._initialized = true;
+        })();
+        return this._initPromise;
+      },
+
+      getAll() {
+        if (!this._initialized) {
+          return this._readLocalStorageChats();
+        }
+        return [...this._chats];
+      },
+
+      saveAll(chats) {
+        const nextChats = Array.isArray(chats) ? [...chats] : [];
+        this._chats = nextChats;
+        this._initialized = true;
+
+        if (!this._db && this._dbUnavailable) {
+          this._saveLocalStorageChats(nextChats);
+          return;
+        }
+
+        this._writeChain = this._writeChain.then(async () => {
+          if (!this._db && !this._dbUnavailable) {
+            await this.init();
+          }
+          if (!this._db) {
+            this._saveLocalStorageChats(this._chats);
+            return;
+          }
+          try {
+            await this._syncChatsToDb(this._db, this._chats);
+          } catch (e) {
+            console.error('[ChatStore] Failed to persist chats to IndexedDB:', e);
+          }
+        });
+      },
+
+      async clearAll() {
+        this._chats = [];
+        this._initialized = true;
+        try {
+          localStorage.removeItem(STORAGE_KEYS.CHATS);
+        } catch { }
+
+        await this._writeChain.catch(() => {});
+
+        if (this._db) {
+          try {
+            await new Promise((resolve) => {
+              const tx = this._db.transaction('chats', 'readwrite');
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => resolve();
+              tx.objectStore('chats').clear();
+            });
+          } catch { }
+          try { this._db.close(); } catch { }
+          this._db = null;
+        }
+        this._initPromise = null;
+        if (window.indexedDB) {
+          try {
+            indexedDB.deleteDatabase('aetherweaver_chats_v1');
+          } catch { }
         }
       }
     };
@@ -4703,33 +5014,10 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       },
 
       getChats() {
-        try {
-          const raw = localStorage.getItem(STORAGE_KEYS.CHATS);
-          if (!raw) return [];
-          return JSON.parse(raw);
-        } catch (e) {
-          return [];
-        }
+        return ChatStore.getAll();
       },
       saveChats(chats) {
-        try {
-          localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(chats));
-        } catch (e) {
-          console.error('[Storage] Failed to save chats to localStorage:', e);
-          if (e.name === 'QuotaExceededError' || e.code === 22) {
-            try {
-              const safeChats = JSON.parse(JSON.stringify(chats));
-              safeChats.forEach(c => c.messages?.forEach(m => m.alternatives?.forEach(a => {
-                if (a.imageUrl && a.imageUrl.startsWith('data:image/')) {
-                  a.imageUrl = '';
-                }
-              })));
-              localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(safeChats));
-            } catch (err2) {
-              console.error('[Storage] Emergency chat save failed:', err2);
-            }
-          }
-        }
+        ChatStore.saveAll(chats);
       },
 
       getPersonas() {
@@ -4817,6 +5105,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
 
       async resetToDemo() {
         Object.values(STORAGE_KEYS).forEach(k => localStorage.removeItem(k));
+        await ChatStore.clearAll();
         if (window.indexedDB) {
           try {
             indexedDB.deleteDatabase('aetherweaver_assets_v1');
@@ -4853,8 +5142,13 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
     };
 
     /* Quick State Accessors */
-    function getActivePersona() {
+    function getActivePersona(chatOverride = null) {
       const personas = Storage.getPersonas();
+      const targetChat = chatOverride || (State.screen === 'chat' ? getActiveChat() : null);
+      if (targetChat && targetChat.personaId) {
+        const chatPersona = personas.find(p => p.id === targetChat.personaId);
+        if (chatPersona) return chatPersona;
+      }
       const id = Storage.getActivePersonaId();
       return personas.find(p => p.id === id) || personas[0];
     }
@@ -4873,10 +5167,11 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       Storage.saveChats(chats);
     }
 
-    function createNewChatForCharacter(character, customGreeting = null) {
+    function createNewChatForCharacter(character, customGreeting = null, personaId = null) {
       const chat = {
         id: 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
         characterId: character.id,
+        personaId: personaId || Storage.getActivePersonaId(),
         title: `Chat with ${character.name}`,
         messages: [
           {
@@ -5461,7 +5756,10 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
 
     function showNewChatModal(char) {
       const root = document.getElementById('modal-root');
-      const persona = getActivePersona();
+      const personas = Storage.getPersonas();
+      const activeId = Storage.getActivePersonaId();
+      let selectedPersonaId = personas.some(p => p.id === activeId) ? activeId : (personas[0]?.id || '');
+      const persona = personas.find(p => p.id === selectedPersonaId) || getActivePersona();
       let selectedMode = 'standard'; // 'standard' | 'dynamic'
 
       root.innerHTML = `
@@ -5472,10 +5770,15 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               <button class="icon-btn" data-action="close-modal" aria-label="Close modal">${Icons.close}</button>
             </div>
             <div class="modal-body">
-              <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:1rem; padding:0.55rem 0.8rem; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.85rem;">
-                <span style="color:var(--text-muted); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:600;">Active Persona:</span>
-                <strong style="color:var(--text-primary);">${escapeHtml(persona.name)}</strong>
-                <span style="font-size:0.78rem; color:var(--text-secondary); margin-left:auto; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; max-width:180px;">${escapeHtml(persona.description || '')}</span>
+              <div style="display:flex; flex-direction:column; gap:0.45rem; margin-bottom:1rem; padding:0.65rem 0.85rem; background:var(--bg-elevated); border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.85rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                  <img id="modal-persona-avatar" src="${ImageStore.resolveUrl(persona.avatar)}" ${persona.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(persona.avatar.slice(4))}"` : ''} alt="${escapeHtml(persona.name)}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;">
+                  <span style="color:var(--text-muted); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em; font-weight:600; flex-shrink:0;">Persona:</span>
+                  <select id="modal-persona-select" class="select-field" style="min-height:34px; padding:0.3rem 0.6rem; font-size:0.86rem; font-weight:600; flex:1;" aria-label="Select Persona for this chat">
+                    ${personas.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === selectedPersonaId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                  </select>
+                </div>
+                <span id="modal-persona-desc" style="font-size:0.78rem; color:var(--text-secondary); line-height:1.35; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">${escapeHtml(persona.description || 'No persona description set.')}</span>
               </div>
 
               <!-- Option A: Standard Greeting -->
@@ -5497,8 +5800,8 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   </strong>
                   <span class="badge" style="font-size:0.72rem; border-color:var(--accent); color:var(--accent);">NovelAI</span>
                 </div>
-                <p style="font-size:0.82rem; color:var(--text-secondary); margin:0 0 0.5rem 0; line-height:1.45;">
-                  The AI crafts a fresh, immersive scenario respecting ${escapeHtml(char.name)}'s universe and your active persona (${escapeHtml(persona.name)}).
+                <p id="modal-dynamic-desc" style="font-size:0.82rem; color:var(--text-secondary); margin:0 0 0.5rem 0; line-height:1.45;">
+                  The AI crafts a fresh, immersive scenario respecting ${escapeHtml(char.name)}'s universe and your selected persona (<span id="modal-dynamic-persona-name">${escapeHtml(persona.name)}</span>).
                 </p>
                 <div id="modal-dynamic-prompt-wrap" style="display:none; margin-top:0.65rem;">
                   <label for="custom-scenario-prompt" class="form-label" style="font-size:0.8rem; margin-bottom:0.3rem;">Scenario Premise (Optional)</label>
@@ -5514,10 +5817,36 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         </div>
       `;
 
+      const personaSelect = root.querySelector('#modal-persona-select');
+      const personaAvatar = root.querySelector('#modal-persona-avatar');
+      const personaDesc = root.querySelector('#modal-persona-desc');
+      const dynamicPersonaName = root.querySelector('#modal-dynamic-persona-name');
       const optStandard = root.querySelector('#modal-opt-standard');
       const optDynamic = root.querySelector('#modal-opt-dynamic');
       const promptWrap = root.querySelector('#modal-dynamic-prompt-wrap');
       const promptInput = root.querySelector('#custom-scenario-prompt');
+
+      if (personaSelect) {
+        personaSelect.addEventListener('change', (e) => {
+          selectedPersonaId = e.target.value;
+          const nextPersona = personas.find(p => p.id === selectedPersonaId) || persona;
+          if (personaAvatar) {
+            if (nextPersona.avatar?.startsWith('idb:')) {
+              personaAvatar.setAttribute('data-idb-key', nextPersona.avatar.slice(4));
+            } else {
+              personaAvatar.removeAttribute('data-idb-key');
+            }
+            personaAvatar.src = ImageStore.resolveUrl(nextPersona.avatar);
+            personaAvatar.alt = nextPersona.name;
+          }
+          if (personaDesc) {
+            personaDesc.textContent = nextPersona.description || 'No persona description set.';
+          }
+          if (dynamicPersonaName) {
+            dynamicPersonaName.textContent = nextPersona.name;
+          }
+        });
+      }
 
       const setMode = (mode) => {
         selectedMode = mode;
@@ -5552,7 +5881,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         root.innerHTML = '';
 
         if (selectedMode === 'standard') {
-          const chat = createNewChatForCharacter(char);
+          const chat = createNewChatForCharacter(char, null, selectedPersonaId);
           State.activeCharacterId = char.id;
           State.activeChatId = chat.id;
           State.chatMenuOpen = false;
@@ -5563,7 +5892,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
           State.suggestedReplies = await API.suggestReplies({ character: char, messages: chat.messages });
           renderMainView();
         } else {
-          const chat = createNewChatForCharacter(char, '');
+          const chat = createNewChatForCharacter(char, '', selectedPersonaId);
           triggerOpeningScenarioGeneration({ chat, char, userPrompt });
         }
       });
@@ -5631,7 +5960,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             <img src="${ImageStore.resolveUrl(persona.avatar)}" ${persona.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(persona.avatar.slice(4))}"` : ''} alt="${escapeHtml(persona.name)}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;">
             <div style="min-width:0; flex:1;">
               <div style="font-size:0.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(persona.name)}</div>
-              <div style="font-size:0.7rem; color:var(--text-muted);">Active Persona</div>
+              <div style="font-size:0.7rem; color:var(--text-muted);">${State.screen === 'chat' ? 'Chat Persona' : 'Default Persona'}</div>
             </div>
           </div>
         </div>
@@ -5875,7 +6204,8 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         State.screen = 'discover';
         return renderMainView();
       }
-      const persona = getActivePersona();
+      const allPersonas = Storage.getPersonas();
+      const persona = getActivePersona(chat);
       const settings = Storage.getSettings();
 
       let promptStats = null;
@@ -5911,6 +6241,12 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               </div>
 
               <div class="chat-header-actions">
+                <div class="chat-persona-chip" title="Persona for this chat">
+                  <img src="${ImageStore.resolveUrl(persona.avatar)}" ${persona.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(persona.avatar.slice(4))}"` : ''} alt="${escapeHtml(persona.name)}">
+                  <select id="chat-header-persona-select" class="chat-persona-select" aria-label="Active Persona for this chat" title="Persona for this chat">
+                    ${allPersonas.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === persona.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                  </select>
+                </div>
                 <button class="btn ${State.contextDrawerOpen ? 'btn-primary' : 'btn-secondary'}" data-action="toggle-context-drawer" aria-label="Toggle Memory and Lorebook Panel" title="Memory, Author's Note & Lorebook">
                   ${Icons.book} <span style="font-size:0.82rem;">Context</span>
                 </button>
@@ -6000,6 +6336,17 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                   <span>${promptStats?.historyKept || 0} / ${promptStats?.historyTotal || 0} messages kept</span>
                   <span>${(promptStats?.loreTriggered || []).length} lore triggered</span>
                 </div>
+              </div>
+
+              <div class="form-group" style="margin-bottom:0;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
+                  <label class="form-label" for="ctx-persona-select" style="margin-bottom:0;">Active Persona (This Chat)</label>
+                  <button class="mini-btn" data-action="nav" data-screen="personas">Manage</button>
+                </div>
+                <select id="ctx-persona-select" class="select-field" aria-label="Active Persona for this chat">
+                  ${allPersonas.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === persona.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                </select>
+                <span class="form-hint">${escapeHtml(persona.description || 'No persona description set.')}</span>
               </div>
 
               <div class="form-group" style="margin-bottom:0;">
@@ -6190,6 +6537,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         <div style="display:flex; flex-direction:column; gap:0.75rem;">
           ${filtered.map(chat => {
             const ch = chars.find(x => x.id === chat.characterId) || { name: 'Unknown Character', avatar: makeSvgAvatar('?', '#333', '#111') };
+            const chatPersona = getActivePersona(chat);
             const lastMsg = chat.messages[chat.messages.length - 1];
             const lastText = lastMsg ? (lastMsg.alternatives[lastMsg.selectedIndex]?.text || '') : '';
             const dateStr = new Date(chat.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -6198,9 +6546,10 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
                 <div style="display:flex; align-items:center; gap:0.85rem; min-width:0; flex:1;">
                   <img src="${ImageStore.resolveUrl(ch.avatar)}" ${ch.avatar?.startsWith('idb:') ? `data-idb-key="${escapeHtml(ch.avatar.slice(4))}"` : ''} alt="${escapeHtml(ch.name)}" style="width:52px;height:52px;border-radius:12px;object-fit:cover;flex-shrink:0;">
                   <div style="min-width:0; flex:1;">
-                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
                       <span style="font-weight:700; font-size:0.98rem;">${escapeHtml(chat.title)}</span>
                       <span class="badge">${escapeHtml(ch.name)}</span>
+                      <span class="badge" style="background:var(--bg-elevated); color:var(--text-secondary);" title="Persona for this chat">as ${escapeHtml(chatPersona.name)}</span>
                     </div>
                     <div style="font-size:0.84rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:0.2rem;">
                       ${escapeHtml(lastText.replace(/[*"]/g, '').slice(0, 90))}
@@ -6819,7 +7168,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       State.isGenerating = true;
       State.abortController = new AbortController();
 
-      const persona = getActivePersona();
+      const persona = getActivePersona(chat);
       const settings = Storage.getSettings();
 
       let msgObj = targetMessage;
@@ -6948,7 +7297,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
 
       await renderMainView();
 
-      const persona = getActivePersona();
+      const persona = getActivePersona(chat);
       const settings = Storage.getSettings();
       const msgObj = chat.messages[0];
       const altIdx = 0;
@@ -7211,6 +7560,33 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             handleSendUserMessage();
           }
         });
+      }
+
+      // Per-chat Persona Selectors (Chat Header & Context Drawer)
+      const handleChatPersonaChange = async (newPersonaId) => {
+        const chat = getActiveChat();
+        const personas = Storage.getPersonas();
+        const selected = personas.find(p => p.id === newPersonaId);
+        if (!chat || !selected) return;
+        chat.personaId = selected.id;
+        updateChatInStorage(chat);
+        showToast(`Chat persona set to "${selected.name}".`, 'success');
+        const container = document.getElementById('chat-messages');
+        const savedTop = container ? container.scrollTop : 0;
+        State.preserveScrollPosition = true;
+        await renderMainView();
+        State.preserveScrollPosition = false;
+        const nextCont = document.getElementById('chat-messages');
+        if (nextCont) nextCont.scrollTop = savedTop;
+      };
+
+      const headerPersonaEl = document.getElementById('chat-header-persona-select');
+      const ctxPersonaEl = document.getElementById('ctx-persona-select');
+      if (headerPersonaEl) {
+        headerPersonaEl.addEventListener('change', (e) => handleChatPersonaChange(e.target.value));
+      }
+      if (ctxPersonaEl) {
+        ctxPersonaEl.addEventListener('change', (e) => handleChatPersonaChange(e.target.value));
       }
 
       // Context Drawer Auto-save (Memory, Author's Note, Lorebook)
@@ -8149,17 +8525,50 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         case 'import-chat': {
           State.chatMenuOpen = false;
           promptJsonImport((data) => {
-            if (!Array.isArray(data.messages)) throw new Error('Invalid chat JSON.');
+            const rawChats = Array.isArray(data?.chats)
+              ? data.chats
+              : (Array.isArray(data?.messages) ? [data] : null);
+            if (!rawChats || rawChats.length === 0 || !rawChats.every(c => c && Array.isArray(c.messages))) {
+              throw new Error('Invalid chat JSON.');
+            }
             const current = getActiveChat();
-            const imported = {
-              ...data,
-              id: 'chat_' + Date.now(),
-              characterId: current ? current.characterId : data.characterId,
-              updatedAt: Date.now()
-            };
-            updateChatInStorage(imported);
-            State.activeChatId = imported.id;
-            showToast('Imported chat session.', 'success');
+            const fallbackCharId = current ? current.characterId : State.activeCharacterId;
+            const personas = Storage.getPersonas();
+            const defaultPersonaId = Storage.getActivePersonaId();
+            const now = Date.now();
+            const importedChats = rawChats.map((entry, idx) => {
+              const hasLorebook = Array.isArray(entry.lorebook) && entry.lorebook.length > 0;
+              const inheritedLorebook = (!hasLorebook && Array.isArray(current?.lorebook) && current.lorebook.length > 0)
+                ? current.lorebook.map(l => ({
+                    ...JSON.parse(JSON.stringify(l)),
+                    id: 'lore_' + now + '_' + idx + '_' + Math.random().toString(36).slice(2, 6)
+                  }))
+                : (Array.isArray(entry.lorebook) ? entry.lorebook : []);
+              const resolvedPersonaId = (entry.personaId && personas.some(p => p.id === entry.personaId))
+                ? entry.personaId
+                : defaultPersonaId;
+              return {
+                ...entry,
+                id: `chat_${now}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+                characterId: fallbackCharId || entry.characterId || '',
+                personaId: resolvedPersonaId,
+                lorebook: inheritedLorebook,
+                updatedAt: now + idx
+              };
+            });
+            for (const imported of importedChats) {
+              updateChatInStorage(imported);
+            }
+            State.activeChatId = importedChats[importedChats.length - 1].id;
+            State.visibleMessageLimit = 40;
+            State.preserveScrollPosition = false;
+            State.isLoadingOlder = false;
+            showToast(
+              importedChats.length === 1
+                ? 'Imported chat session.'
+                : `Imported ${importedChats.length} chat sessions.`,
+              'success'
+            );
             renderMainView();
           });
           break;
@@ -8379,8 +8788,9 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
      * ============================================================================
      */
     async function initApp() {
-      // 1. Initialize IndexedDB store for images
+      // 1. Initialize IndexedDB stores for images & chats
       await ImageStore.init();
+      await ChatStore.init();
 
       // 2. Clear stuck loading flags and migrate legacy base64 images to IndexedDB
       await ImageStore.migrateLocalStorage();
