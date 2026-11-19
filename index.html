@@ -2050,6 +2050,8 @@
      * @typedef {Object} Message
      * @property {string} id - Unique identifier
      * @property {'user'|'char'} role - Sender role
+     * @property {string} [personaId] - ID of the Persona used when this user message was sent
+     * @property {string} [personaName] - Snapshot of the Persona name when this user message was sent
      * @property {MessageAlternative[]} alternatives - Swipeable message versions
      * @property {number} selectedIndex - Active index in `alternatives`
      *
@@ -2311,8 +2313,14 @@
 
         // History (everything before the message being generated)
         const targetIdx = this.findTargetIndex(messages || [], continueFrom);
+        const personasList = (typeof Storage !== 'undefined' && Storage.getPersonas) ? Storage.getPersonas() : null;
         const history = (messages || []).slice(0, targetIdx)
-          .map(m => ({ speaker: m.role === 'user' ? userName : charName, text: fill(this.altText(m)) }))
+          .map(m => {
+            const speaker = m.role === 'user'
+              ? ((typeof getMessagePersona === 'function' ? getMessagePersona(m, persona, personasList)?.name : null) || m.personaName || userName)
+              : charName;
+            return { speaker, text: fill(this.altText(m)) };
+          })
           .filter(h => h.text && h.text !== this.STOPPED_PLACEHOLDER);
         const historyLines = history.map(h => `${h.speaker}: ${h.text}`);
 
@@ -4282,9 +4290,12 @@
 
           const persona = typeof getActivePersona === 'function' ? getActivePersona() : null;
           const userLabel = persona?.name || 'User';
+          const personasList = (typeof Storage !== 'undefined' && Storage.getPersonas) ? Storage.getPersonas() : null;
 
           const contextLines = recentMsgs.map(m => {
-            const role = m.role === 'user' ? userLabel : cname;
+            const role = m.role === 'user'
+              ? ((typeof getMessagePersona === 'function' ? getMessagePersona(m, persona, personasList)?.name : null) || m.personaName || userLabel)
+              : cname;
             const t = (m.alternatives?.[m.selectedIndex]?.text || '').trim();
             return `${role}: ${t}`;
           }).join('\n');
@@ -5151,6 +5162,27 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       }
       const id = Storage.getActivePersonaId();
       return personas.find(p => p.id === id) || personas[0];
+    }
+
+    function getMessagePersona(msg, fallbackPersona = null, personasList = null) {
+      const fallback = fallbackPersona || getActivePersona();
+      if (!msg || msg.role !== 'user') return fallback;
+      const personas = Array.isArray(personasList) ? personasList : Storage.getPersonas();
+      if (msg.personaId) {
+        const found = personas.find(p => p.id === msg.personaId);
+        if (found) return found;
+      }
+      if (msg.personaName) {
+        const byName = personas.find(p => p.name === msg.personaName);
+        if (byName) return byName;
+        return {
+          id: msg.personaId || 'persona_snapshot',
+          name: msg.personaName,
+          description: '',
+          avatar: makeSvgAvatar(msg.personaName.slice(0, 2).toUpperCase(), '#7c3aed', '#db2777')
+        };
+      }
+      return fallback;
     }
 
     function getActiveChat() {
@@ -6406,8 +6438,9 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
 
     function renderMessageRow(msg, mIdx, totalMsgs, char, persona) {
       const isUser = msg.role === 'user';
-      const senderName = isUser ? persona.name : char.name;
-      const senderAvatar = isUser ? persona.avatar : char.avatar;
+      const msgPersona = isUser ? getMessagePersona(msg, persona) : persona;
+      const senderName = isUser ? msgPersona.name : char.name;
+      const senderAvatar = isUser ? msgPersona.avatar : char.avatar;
       const altIndex = Math.min(msg.selectedIndex || 0, msg.alternatives.length - 1);
       const activeAlt = msg.alternatives[altIndex] || { text: '' };
       const isEditing = State.editingMessageId === msg.id;
@@ -7400,9 +7433,12 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
       if (inputEl) inputEl.value = '';
       State.composerDraft = '';
 
+      const activePersona = getActivePersona(chat);
       chat.messages.push({
         id: 'msg_' + Date.now(),
         role: 'user',
+        personaId: activePersona?.id || '',
+        personaName: activePersona?.name || 'User',
         selectedIndex: 0,
         alternatives: [{ text, createdAt: Date.now() }]
       });
@@ -7568,6 +7604,15 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
         const personas = Storage.getPersonas();
         const selected = personas.find(p => p.id === newPersonaId);
         if (!chat || !selected) return;
+        const prevPersona = getActivePersona(chat);
+        if (Array.isArray(chat.messages)) {
+          chat.messages.forEach(m => {
+            if (m && m.role === 'user' && !m.personaId) {
+              m.personaId = prevPersona?.id || '';
+              m.personaName = m.personaName || prevPersona?.name || 'User';
+            }
+          });
+        }
         chat.personaId = selected.id;
         updateChatInStorage(chat);
         showToast(`Chat persona set to "${selected.name}".`, 'success');
@@ -8547,11 +8592,21 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
               const resolvedPersonaId = (entry.personaId && personas.some(p => p.id === entry.personaId))
                 ? entry.personaId
                 : defaultPersonaId;
+              const resolvedPersona = personas.find(p => p.id === resolvedPersonaId) || getActivePersona();
+              const stampedMessages = entry.messages.map(m => {
+                if (!m || m.role !== 'user' || m.personaId) return m;
+                return {
+                  ...m,
+                  personaId: resolvedPersona?.id || resolvedPersonaId,
+                  personaName: m.personaName || resolvedPersona?.name || 'User'
+                };
+              });
               return {
                 ...entry,
                 id: `chat_${now}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
                 characterId: fallbackCharId || entry.characterId || '',
                 personaId: resolvedPersonaId,
+                messages: stampedMessages,
                 lorebook: inheritedLorebook,
                 updatedAt: now + idx
               };
