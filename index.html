@@ -8579,7 +8579,7 @@ Roleplay rules: stay in character as Megumin. Write actions in *asterisks* and s
             const current = getActiveChat();
             const fallbackCharId = current ? current.characterId : State.activeCharacterId;
             const personas = Storage.getPersonas();
-            const defaultPersonaId = Storage.getActivePersonaId();
+            const defaultPersonaId = getActivePersona(current)?.id || Storage.getActivePersonaId();
             const now = Date.now();
             const importedChats = rawChats.map((entry, idx) => {
               const hasLorebook = Array.isArray(entry.lorebook) && entry.lorebook.length > 0;
